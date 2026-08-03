@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lightfall-voice"
+description = "Voice notifications plugin for Lightfall via the local Kokoro voice daemon"
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version"]
+dependencies = ["lightfall"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-qt"]
+
+[project.entry-points."lightfall.plugins"]
+lightfall_voice = "lightfall_voice.manifest:manifest"
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lightfall_voice"]
