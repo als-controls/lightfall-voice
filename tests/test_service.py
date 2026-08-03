@@ -1,0 +1,139 @@
+"""Service tests drive stub QObjects with QtClaudeAgent-shaped signals."""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from PySide6.QtCore import QObject, Signal
+
+from lightfall_voice.policy import AgentOverride, VoiceSettings
+from lightfall_voice.service import VoiceService
+
+
+class StubAgent(QObject):
+    tool_called = Signal(str, dict)
+    result_received = Signal(dict)
+    error_occurred = Signal(str)
+    permission_requested = Signal(str, str, dict)
+    task_finished = Signal(str, str, str, str, dict)
+
+
+class StubWidget(QObject):
+    def __init__(self, agent_name="lightfall"):
+        super().__init__()
+        self.agent = StubAgent()
+        self.spec = SimpleNamespace(name=agent_name)
+
+
+def make_service(qtbot, widgets, settings=None, t0=1000.0):
+    clock = {"t": t0}
+    client = MagicMock()
+    service = VoiceService(
+        settings=settings or VoiceSettings(),
+        client=client,
+        widget_scanner=lambda: widgets,
+        clock=lambda: clock["t"],
+    )
+    service.rescan()
+    return service, client, clock
+
+
+def test_tool_call_speaks_phrase(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.tool_called.emit("Read", {"file_path": "C:/x/loader.py"})
+    client.speak.assert_called_once_with("Reading loader", voice=None)
+
+
+def test_permission_request_speaks_high_priority_phrase(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.permission_requested.emit("req1", "Bash", {})
+    client.speak.assert_called_once_with("Permission needed to run a command", voice=None)
+
+
+def test_result_speaks_summary(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.result_received.emit({"result": "Fixed the flaky test."})
+    client.speak.assert_called_once_with("Fixed the flaky test.", voice=None)
+
+
+def test_result_without_text_says_task_complete(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.result_received.emit({})
+    client.speak.assert_called_once_with("Task complete", voice=None)
+
+
+def test_error_speaks_attention_phrase(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.error_occurred.emit("boom")
+    client.speak.assert_called_once_with("Agent error. Attention needed", voice=None)
+
+
+def test_subagent_session_is_muted_for_low_priority(qtbot):
+    w = StubWidget(agent_name="alignment")
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.tool_called.emit("Read", {"file_path": "C:/x/a.py"})
+    w.agent.result_received.emit({"result": "done"})
+    client.speak.assert_not_called()
+
+
+def test_subagent_error_is_name_prefixed(qtbot):
+    w = StubWidget(agent_name="alignment")
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.error_occurred.emit("boom")
+    client.speak.assert_called_once_with("Agent alignment error. Attention needed", voice=None)
+
+
+def test_subagent_permission_is_name_prefixed(qtbot):
+    w = StubWidget(agent_name="alignment")
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.permission_requested.emit("req1", "Edit", {})
+    client.speak.assert_called_once_with(
+        "Agent alignment: permission needed to edit a file", voice=None
+    )
+
+
+def test_rescan_is_idempotent(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    service.rescan()
+    service.rescan()
+    w.agent.tool_called.emit("Bash", {"command": "ls"})
+    client.speak.assert_called_once()  # exactly one connection despite 3 scans
+
+
+def test_widget_without_agent_attr_is_skipped(qtbot):
+    class Degraded(QObject):
+        pass
+    service, client, _ = make_service(qtbot, [Degraded()])  # must not raise
+
+
+def test_apply_settings_updates_policy_and_client(qtbot):
+    w = StubWidget(agent_name="alignment")
+    service, client, _ = make_service(qtbot, [w])
+    new = VoiceSettings(
+        daemon_host="127.0.0.1", daemon_port=6000,
+        agent_overrides={"alignment": AgentOverride(muted=False, voice="af_sky")},
+    )
+    service.apply_settings(new)
+    client.configure.assert_called_with("127.0.0.1", 6000)
+    w.agent.tool_called.emit("Grep", {})
+    client.speak.assert_called_once_with("Searching", voice="af_sky")
+
+
+def test_silent_tools_do_not_speak(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.tool_called.emit("TodoWrite", {})
+    w.agent.tool_called.emit("Task", {})
+    client.speak.assert_not_called()
+
+
+def test_handler_exceptions_do_not_propagate(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    client.speak.side_effect = RuntimeError("client exploded")
+    w.agent.tool_called.emit("Bash", {})  # must not raise through emit
