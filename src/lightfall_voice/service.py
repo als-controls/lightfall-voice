@@ -70,6 +70,9 @@ class VoiceService(QObject):
         # real reference too: Qt disconnects automatically on destruction.
         self._attached: dict[int, QObject] = {}
         self._bus = None
+        # Buffer the latest non-empty message text per agent (by name), so
+        # result_received (which carries no message text) can speak it.
+        self._last_message: dict[str, str] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -94,7 +97,9 @@ class VoiceService(QObject):
         self._attached.clear()
 
     def apply_settings(self, settings: VoiceSettings) -> None:
+        old_last_tool_time = self._policy._last_tool_time
         self._policy = VoicePolicy(settings, primary_agent=PRIMARY_AGENT)
+        self._policy._last_tool_time = old_last_tool_time
         self._client.configure(settings.daemon_host, settings.daemon_port)
 
     def speak_test(self, message: str = "Voice notifications are working") -> None:
@@ -116,11 +121,13 @@ class VoiceService(QObject):
         agent = getattr(widget, "agent", None)
         if agent is None or id(agent) in self._attached:
             return
-        spec = getattr(widget, "spec", None)
-        agent_name = getattr(spec, "name", None) or PRIMARY_AGENT
+        agent_name = self._resolve_agent_name(widget)
         try:
             agent.tool_called.connect(
                 lambda tool, tool_input, n=agent_name: self._on_tool(n, tool, tool_input)
+            )
+            agent.message_received.connect(
+                lambda text, n=agent_name: self._on_message(n, text)
             )
             agent.result_received.connect(
                 lambda result, n=agent_name: self._on_result(n, result)
@@ -140,6 +147,17 @@ class VoiceService(QObject):
         self._attached[id(agent)] = agent
         logger.info("lightfall-voice: attached to agent session '{}'", agent_name)
 
+    def _resolve_agent_name(self, widget) -> str:
+        endpoint = getattr(widget, "bus_endpoint", None)
+        name = getattr(endpoint, "name", None) if endpoint is not None else None
+        if name:
+            return name
+        spec = getattr(widget, "spec", None)
+        name = getattr(spec, "name", None) if spec is not None else None
+        if name:
+            return name
+        return PRIMARY_AGENT
+
     # -- signal handlers (never raise) ---------------------------------------
 
     def _dispatch(self, event: VoiceEvent) -> None:
@@ -147,7 +165,8 @@ class VoiceService(QObject):
         if decision is None:
             return
         text, voice = decision
-        self._client.speak(text, voice=voice)
+        ttl = None if event.priority == "high" else 10.0
+        self._client.speak(text, voice=voice, ttl=ttl)
 
     def _on_tool(self, agent_name: str, tool: str, tool_input: dict) -> None:
         try:
@@ -158,10 +177,19 @@ class VoiceService(QObject):
         except Exception:
             logger.exception("lightfall-voice: tool handler failed")
 
+    def _on_message(self, agent_name: str, text: str) -> None:
+        try:
+            if text:
+                self._last_message[agent_name] = text
+        except Exception:
+            logger.exception("lightfall-voice: message handler failed")
+
     def _on_result(self, agent_name: str, result: dict) -> None:
         try:
-            raw = result.get("result") if isinstance(result, dict) else None
-            text = phrases.completion_phrase(raw if isinstance(raw, str) else None)
+            buffered = self._last_message.pop(agent_name, None)
+            if not buffered:
+                return
+            text = phrases.completion_phrase(buffered)
             if text is None:
                 return
             self._dispatch(summary_event(agent_name, text, self._clock()))

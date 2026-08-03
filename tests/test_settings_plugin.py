@@ -62,7 +62,7 @@ def test_widget_roundtrip_saves_settings(qtbot):
     service.apply_settings.assert_called_once()
 
 
-def test_validate_rejects_bad_port(qtbot):
+def test_validate_rejects_empty_host(qtbot):
     p = make_plugin()
     widget = p.create_widget()
     qtbot.addWidget(widget)

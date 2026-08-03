@@ -64,3 +64,24 @@ def test_configure_redirects(fake_daemon):
         assert wait_for(lambda: len(fake_daemon.requests) == 1)
     finally:
         client.stop()
+
+
+def test_expired_ttl_message_is_never_sent(fake_daemon):
+    client = DaemonClient(port=fake_daemon.port)
+    try:
+        client.speak("stale", ttl=0.0)
+        client.speak("fresh")
+        assert wait_for(lambda: len(fake_daemon.requests) == 1)
+        assert fake_daemon.requests[0]["args"]["message"] == "fresh"
+    finally:
+        client.stop()
+
+
+def test_none_ttl_message_is_always_sent(fake_daemon):
+    client = DaemonClient(port=fake_daemon.port)
+    try:
+        client.speak("no ttl", ttl=None)
+        assert wait_for(lambda: len(fake_daemon.requests) == 1)
+        assert fake_daemon.requests[0]["args"]["message"] == "no ttl"
+    finally:
+        client.stop()

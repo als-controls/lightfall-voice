@@ -11,6 +11,7 @@ import json
 import queue
 import socket
 import threading
+import time
 
 from lightfall.utils.logging import logger
 
@@ -36,8 +37,15 @@ class DaemonClient:
     def configure(self, host: str, port: int) -> None:
         self._queue.put({"_configure": (host, int(port))})
 
-    def speak(self, message: str, voice: str | None = None) -> None:
-        self._queue.put({"action": "speak", "args": {"message": message, "voice": voice}})
+    def speak(self, message: str, voice: str | None = None, ttl: float | None = None) -> None:
+        deadline = time.monotonic() + ttl if ttl is not None else None
+        self._queue.put(
+            {
+                "action": "speak",
+                "args": {"message": message, "voice": voice},
+                "_deadline": deadline,
+            }
+        )
 
     def stop(self) -> None:
         self._queue.put(_SENTINEL)
@@ -52,8 +60,13 @@ class DaemonClient:
                 # Apply configuration change (maintains queue ordering)
                 self._host, self._port = item["_configure"]
                 continue
+            deadline = item.get("_deadline") if isinstance(item, dict) else None
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.debug("voice daemon message expired before send, dropping")
+                continue
+            request = {k: v for k, v in item.items() if k != "_deadline"}
             try:
-                self._send(item)
+                self._send(request)
             except Exception as e:
                 logger.debug("voice daemon unreachable, dropping message: {}", e)
 
