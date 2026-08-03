@@ -59,7 +59,7 @@ first-class `agent_created` signal, swap discovery to it.
 | `service.py` | `VoiceService` (QObject singleton). Discovery (above), per-agent connection bookkeeping, policy application (subagent mute, per-agent overrides), rate limiting, TTL drop, dispatch to daemon client. |
 | `events.py` | `VoiceEvent(agent_name, kind, text, priority, timestamp)` dataclass + normalizers from each Qt signal. Priorities: permission/error = HIGH, tool/summary = LOW (matches daemon interrupt semantics). |
 | `phrases.py` | Professional phrase set, pure functions: `tool_announcement(tool_name, tool_input)` ("Reading configuration file", "Running a command"), `permission_phrase(tool_name)` ("Permission needed to run a command"), `completion_phrase(result)` (short summary of final text, ≤200 chars, else "Task complete"), `error_phrase(...)` ("Agent error — attention needed"). No personality layer. |
-| `daemon_client.py` | Worker-thread TCP client speaking the daemon's JSON line protocol: `{"action": "speak", "message": ..., "priority": ..., "voice": ...}` fire-and-forget with short connect timeout; never blocks the GUI thread; drops on failure. Sends `voice` from day one (daemon tolerates unknown fields; honoring it is a follow-up in the hooks repo). |
+| `daemon_client.py` | Worker-thread TCP client speaking the daemon's JSON line protocol: `{"action": "speak", "args": {"message": ..., "voice": ...}}` fire-and-forget with short connect timeout; never blocks the GUI thread; drops on failure. The daemon already honors `args.voice`; no priority field is needed — the daemon derives HIGH priority from the words "permission"/"attention", which the phrase set includes deliberately. Requires one small hooks-repo patch: a direct-message branch in `handle_speak_request` (hookless requests are otherwise skipped by `should_announce`). |
 
 ## Event policy
 
@@ -103,7 +103,9 @@ pytest + pytest-qt, no audio, no daemon dependency:
 
 ## Out of scope (v1)
 
-- Daemon autostart, in-process Kokoro, and per-agent voice honoring on the daemon
-  side (small follow-up in `~/.claude/hooks/voice_notifications`).
+- Daemon autostart and in-process Kokoro. (The one hooks-repo change v1 does make
+  is the direct-message daemon patch above.)
+- Per-agent overrides UI (table) — persistence and policy support ship in v1;
+  the table widget is a follow-up (overrides editable via preferences meanwhile).
 - Core lightfall changes (an `agent_created` signal would be a nice-to-have later).
 - Personalities / configurable phrase packs.
