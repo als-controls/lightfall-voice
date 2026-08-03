@@ -34,8 +34,7 @@ class DaemonClient:
         self._thread.start()
 
     def configure(self, host: str, port: int) -> None:
-        self._host = host
-        self._port = int(port)
+        self._queue.put({"_configure": (host, int(port))})
 
     def speak(self, message: str, voice: str | None = None) -> None:
         self._queue.put({"action": "speak", "args": {"message": message, "voice": voice}})
@@ -49,6 +48,10 @@ class DaemonClient:
             item = self._queue.get()
             if item is _SENTINEL:
                 return
+            if isinstance(item, dict) and "_configure" in item:
+                # Apply configuration change (maintains queue ordering)
+                self._host, self._port = item["_configure"]
+                continue
             try:
                 self._send(item)
             except Exception as e:
