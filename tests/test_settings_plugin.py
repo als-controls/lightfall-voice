@@ -79,6 +79,6 @@ def test_test_button_speaks(qtbot):
     service_module.set_service(service)
     try:
         p._on_test_clicked()
-        service._client.speak.assert_called_once()
+        service.speak_test.assert_called_once()
     finally:
         service_module.set_service(None)

@@ -124,6 +124,12 @@ def test_apply_settings_updates_policy_and_client(qtbot):
     client.speak.assert_called_once_with("Searching", voice="af_sky")
 
 
+def test_speak_test_forwards_to_client(qtbot):
+    service, client, _ = make_service(qtbot, [])
+    service.speak_test()
+    client.speak.assert_called_once_with("Voice notifications are working")
+
+
 def test_silent_tools_do_not_speak(qtbot):
     w = StubWidget()
     service, client, _ = make_service(qtbot, [w])

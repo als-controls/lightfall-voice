@@ -110,7 +110,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
     def _on_test_clicked(self) -> None:
         service = service_module.get_service()
         if service is not None:
-            service._client.speak("Voice notifications are working")
+            service.speak_test()
 
     # -- load/save/validate -----------------------------------------------------
 

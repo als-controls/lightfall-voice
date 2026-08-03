@@ -97,6 +97,10 @@ class VoiceService(QObject):
         self._policy = VoicePolicy(settings, primary_agent=PRIMARY_AGENT)
         self._client.configure(settings.daemon_host, settings.daemon_port)
 
+    def speak_test(self, message: str = "Voice notifications are working") -> None:
+        """Speak a test message directly, bypassing policy."""
+        self._client.speak(message)
+
     # -- discovery ---------------------------------------------------------
 
     def rescan(self) -> None:
