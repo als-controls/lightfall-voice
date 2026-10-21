@@ -33,7 +33,7 @@ import math
 import os
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from lightfall_utils.ipc.services.host import ServiceError, ServiceHost, Session
@@ -59,6 +59,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 _RELOAD_KEYS = ("model", "model_dir", "device")
 _END_REASONS = ("silence", "no_speech", "max")
 _MISSING_MODULES = ("faster_whisper", "ctranslate2")
+_SUMMARY_DEVICES = ("cuda", "cpu", "")
 
 TranscriberFactory = Callable[..., Transcriber]
 
@@ -113,9 +114,10 @@ class _Utterance:
     stream_id: str
     session: Session
     detector: EndpointDetector
+    transcriber: Any  # the model current at utterance.start (survives a reload)
     listening: bool = False
     reason: str | None = None  # set once the utterance is ending
-    tasks: set = field(default_factory=set)
+    detector_done: bool = False  # the detector ended it: later chunks are not fed
 
 
 class SttHost(ServiceHost):
@@ -216,7 +218,10 @@ def make_host(
                 err = str(e) or type(e).__name__
                 post("error", {**summary("error", error=err), "model": model}, gen)
                 return
-            device = str(getattr(t, "device", "") or "")
+            device = getattr(t, "device", "")
+            if device not in _SUMMARY_DEVICES:
+                log.warning("transcriber reported device %r; summary shows ''", device)
+                device = ""
             log.info("speech model %s ready on %s", model, device or "?")
             post("ready", {**summary("ready", device), "model": model}, gen, t)
 
@@ -311,7 +316,10 @@ def make_host(
         )
         st["active"] = sid
         utterances[sid] = _Utterance(
-            sid, session, EndpointDetector(silence_s=cfg["silence_s"])
+            sid,
+            session,
+            EndpointDetector(silence_s=cfg["silence_s"]),
+            st["transcriber"],
         )
         return {"stream_id": sid}
 
@@ -346,13 +354,16 @@ def make_host(
         u = utterances.get(sid)
         if u is None:
             return
-        if data and u.reason is None:
+        # After utterance.stop the chunks already queued (and a final chunk's data) are
+        # still fed, so the last word is kept; only the detector's own end stops feeding.
+        if data and not u.detector_done:
             ev = u.detector.feed(pcm16_to_float32(data))
             if ev == "listening" and not u.listening:
                 u.listening = True
                 await host.emit(session, "utterance.listening", {"stream_id": sid})
-            elif ev in _END_REASONS:
+            elif ev in _END_REASONS and u.reason is None:
                 u.reason = ev
+                u.detector_done = True
                 await host.end_stream(sid, final=True, reason=ev)
         if final:
             await finalize(u)
@@ -367,7 +378,7 @@ def make_host(
             )
             if reason == "no_speech":
                 return
-            transcriber = st["transcriber"]
+            transcriber = u.transcriber
             if transcriber is None:
                 await host.emit(
                     session,

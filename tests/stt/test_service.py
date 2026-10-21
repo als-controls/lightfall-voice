@@ -283,6 +283,117 @@ def test_no_speech(broker_url):
     assert fac.made[0].calls == []
 
 
+def _hold_listening(host):
+    """Hold the stream handler at its utterance.listening emit until the returned event is
+    set, so the chunks after it are still queued when a following rpc runs."""
+    release = asyncio.Event()
+    orig = host.emit
+
+    async def emit(session, name, payload):
+        if name == "utterance.listening":
+            await release.wait()
+        return await orig(session, name, payload)
+
+    host.emit = emit
+    return release
+
+
+def test_stop_right_after_chunks_keeps_all_audio(broker_url):
+    """Chunks still queued when utterance.stop runs are fed, not dropped."""
+    n_chunks = 30
+    fac = Factory("all of it")
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            release = _hold_listening(r.host)
+            sid = await r.start()
+            sent = await r.send(sid, _tone(n_chunks * CHUNK_SAMPLES / RATE))
+            reply = await r.client.call("utterance.stop", {"stream_id": sid})
+            release.set()
+            await _until(lambda: "transcript" in r.names())
+            return r, sent, reply
+        finally:
+            await r.close()
+
+    r, sent, reply = _run(go())
+    assert sent == n_chunks
+    assert reply["status"] == "ok"
+    assert r.get("ended")[0]["reason"] == "stop"
+    ((n, _lang),) = fac.made[0].calls
+    assert n == n_chunks * CHUNK_SAMPLES
+
+
+def test_final_chunk_data_before_stop_is_kept(broker_url):
+    fac = Factory()
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            release = _hold_listening(r.host)
+            sid = await r.start()
+            chunks = _chunks(_tone(1.0))
+            for seq, c in enumerate(chunks[:-1]):
+                await r.client.send_chunk(sid, seq, c)
+            await r.client.send_chunk(sid, len(chunks) - 1, chunks[-1], final=True)
+            await r.client.call("utterance.stop", {"stream_id": sid})
+            release.set()
+            await _until(lambda: "transcript" in r.names())
+            return r, len(chunks)
+        finally:
+            await r.close()
+
+    r, n_chunks = _run(go())
+    assert r.get("ended")[0]["reason"] == "stop"
+    ((n, _lang),) = fac.made[0].calls
+    assert n == n_chunks * CHUNK_SAMPLES
+
+
+def test_reload_mid_utterance_keeps_its_transcriber(broker_url):
+    fac = Factory("old model")
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            sid = await r.start()
+            await r.send(sid, _tone(1.0))
+            fac.gate.clear()  # the reload blocks: no model while it runs
+            await r.client.call("config.set", {"model": "base"})
+            await r.client.call("utterance.stop", {"stream_id": sid})
+            await _until(lambda: "transcript" in r.names() or "error" in r.names())
+            fac.gate.set()
+            await r.ready()
+            return r
+        finally:
+            fac.gate.set()
+            await r.close()
+
+    r = _run(go())
+    assert "error" not in r.names()
+    assert r.get("transcript")[0]["text"] == "old model"
+
+
+def test_summary_device_is_validated(broker_url):
+    class Odd(Factory):
+        def __call__(self, **cfg):
+            t = super().__call__(**cfg)
+            t.device = "cuda:0"
+            return t
+
+    async def go():
+        r = await _rig(broker_url, Odd())
+        try:
+            await r.ready()
+            return dict(r.host.summary)
+        finally:
+            await r.close()
+
+    assert _run(go())["device"] == ""
+
+
 def test_stop_finalizes_early(broker_url):
     fac = Factory("stop here")
 
@@ -457,8 +568,11 @@ def test_summary_status_transitions(broker_url):
 
 
 def test_missing_faster_whisper_reports_install_hint(broker_url, monkeypatch):
+    from lightfall_voice.stt_service import transcriber as tr
+
     monkeypatch.delenv("LIGHTFALL_STT_FAKE", raising=False)
     monkeypatch.setitem(sys.modules, "faster_whisper", None)
+    monkeypatch.setattr(tr, "add_nvidia_dll_dirs", lambda: [])
 
     async def go():
         r = await _rig(broker_url)  # the real factory

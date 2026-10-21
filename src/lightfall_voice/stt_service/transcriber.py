@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 DEVICES = ("auto", "gpu", "cpu")
 _NVIDIA_PACKAGES = ("nvidia.cublas", "nvidia.cudnn")
+_ADDED_DLL_DIRS: dict[str, Any] = {}  # bin dir -> add_dll_directory handle (kept alive)
 
 
 class Transcriber(Protocol):
@@ -30,7 +31,11 @@ class Transcriber(Protocol):
 
 def add_nvidia_dll_dirs() -> list[str]:
     """On Windows, add the ``bin`` dirs of installed ``nvidia-cublas-cu12`` /
-    ``nvidia-cudnn-cu12`` wheels to the DLL search path (ctranslate2 loads them lazily)."""
+    ``nvidia-cudnn-cu12`` wheels to the DLL search path (ctranslate2 loads them lazily).
+
+    Idempotent: a dir already added (e.g. on a model reload) is not added again, so
+    ``PATH`` does not grow.  Returns the dirs added by this call.
+    """
     if os.name != "nt":
         return []
     added: list[str] = []
@@ -41,14 +46,17 @@ def add_nvidia_dll_dirs() -> list[str]:
             spec = None
         for loc in (spec.submodule_search_locations or []) if spec is not None else []:
             bin_dir = os.path.join(loc, "bin")
-            if not os.path.isdir(bin_dir):
+            if bin_dir in _ADDED_DLL_DIRS or not os.path.isdir(bin_dir):
                 continue
             try:
-                os.add_dll_directory(bin_dir)
+                handle = os.add_dll_directory(bin_dir)
             except OSError:
                 log.debug("add_dll_directory(%s) failed", bin_dir, exc_info=True)
                 continue
-            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+            _ADDED_DLL_DIRS[bin_dir] = handle
+            path = os.environ.get("PATH", "")
+            if bin_dir not in path.split(os.pathsep):
+                os.environ["PATH"] = bin_dir + os.pathsep + path
             added.append(bin_dir)
     return added
 
@@ -96,6 +104,7 @@ class FasterWhisperTranscriber:
 
     def _load_auto(self, fw: Any) -> tuple[Any, str]:
         if _cuda_device_count() != 0:
+            model = None
             try:
                 model = self._make(fw, "cuda", "float16")
                 # cuBLAS/cuDNN are loaded on first use: run one tiny decode so a missing
@@ -109,6 +118,7 @@ class FasterWhisperTranscriber:
                 return model, "cuda"
             except Exception as e:
                 log.warning("CUDA load failed (%s); falling back to CPU", e)
+                del model  # free GPU memory before the CPU load
         return self._make(fw, "cpu", "int8"), "cpu"
 
     def _make(self, fw: Any, device: str, compute_type: str) -> Any:

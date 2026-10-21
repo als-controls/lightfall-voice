@@ -160,6 +160,7 @@ def test_windows_adds_nvidia_dll_dirs(fakes, monkeypatch, tmp_path):
     for pkg in ("cublas", "cudnn"):
         (tmp_path / "nvidia" / pkg / "bin").mkdir(parents=True)
     added: list[str] = []
+    monkeypatch.setattr(tr, "_ADDED_DLL_DIRS", {})
     monkeypatch.setattr(tr.os, "name", "nt")
     monkeypatch.setattr(tr.os, "add_dll_directory", added.append, raising=False)
 
@@ -174,6 +175,33 @@ def test_windows_adds_nvidia_dll_dirs(fakes, monkeypatch, tmp_path):
     assert sorted(added) == sorted(
         str(tmp_path / "nvidia" / p / "bin") for p in ("cublas", "cudnn")
     )
+
+
+def test_nvidia_dll_dirs_idempotent(monkeypatch, tmp_path):
+    from lightfall_voice.stt_service import transcriber as tr
+
+    (tmp_path / "nvidia" / "cublas" / "bin").mkdir(parents=True)
+    added: list[str] = []
+    monkeypatch.setattr(tr, "_ADDED_DLL_DIRS", {})
+    monkeypatch.setenv("PATH", "base")
+    monkeypatch.setattr(tr.os, "name", "nt")
+    monkeypatch.setattr(tr.os, "add_dll_directory", added.append, raising=False)
+
+    def find_spec(name):
+        if not name.endswith("cublas"):
+            return None
+        return SimpleNamespace(
+            submodule_search_locations=[str(tmp_path / "nvidia" / "cublas")]
+        )
+
+    monkeypatch.setattr(tr.importlib.util, "find_spec", find_spec)
+    first = tr.add_nvidia_dll_dirs()
+    path_after_first = tr.os.environ["PATH"]
+    second = tr.add_nvidia_dll_dirs()
+    assert first == [str(tmp_path / "nvidia" / "cublas" / "bin")]
+    assert second == []
+    assert added == first
+    assert tr.os.environ["PATH"] == path_after_first
 
 
 def test_import_without_faster_whisper(monkeypatch):
