@@ -643,3 +643,32 @@ def test_transcribing_watchdog_interval(rig):
     assert rig.ctl._watchdog.interval() == 120_000
     rig.ctl._watchdog.timeout.emit()
     assert rig.ctl.state == "idle"
+
+
+def test_enabled_start_retries_until_service_registered(qtbot):
+    """Preload runs before the stt descriptor is registered: start once it appears."""
+
+    class LateManager(FakeManager):
+        registered = False
+
+        def ensure_started(self, name):
+            if not self.registered:
+                raise KeyError(name)
+            super().ensure_started(name)
+
+    manager = LateManager()
+    ctl = VoiceInputController(
+        VoiceInputSettings(enabled=True),
+        None,
+        manager=manager,
+        widget_scanner=lambda: [],
+        window_lookup=lambda: None,
+    )
+    ctl.start()
+    assert manager.started == []
+    manager.registered = True
+    manager.services_changed.emit()
+    assert manager.started == ["stt"]
+    manager.services_changed.emit()
+    assert manager.started == ["stt"]  # only once
+    ctl.stop()

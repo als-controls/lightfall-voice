@@ -212,6 +212,7 @@ class VoiceInputController(QObject):
         self._scan = widget_scanner
 
         self._started = False
+        self._start_pending = False  # enabled, but "stt" was not registered yet
         self._bus = None
         # Keyed by id(widget); the entry also keeps the widget, so a reused id (the old
         # widget was destroyed without _forget_widget running) is detected in
@@ -396,7 +397,10 @@ class VoiceInputController(QObject):
         try:
             self._mgr().ensure_started(SERVICE)
         except KeyError:
-            logger.warning("lightfall-voice: the stt service is not registered")
+            # Preload plugins run before service plugins register their descriptors:
+            # retry on the next services_changed (see _sync_client).
+            self._start_pending = True
+            logger.debug("lightfall-voice: the stt service is not registered yet")
         except Exception:
             logger.exception("lightfall-voice: could not start the stt service")
 
@@ -407,6 +411,10 @@ class VoiceInputController(QObject):
     def _sync_client(self) -> None:
         if not self._started:
             return
+        if self._start_pending:
+            self._start_pending = False
+            if self._settings.enabled:
+                self._ensure_started()
         client = self._mgr().client(SERVICE)
         if client is not self._client:
             self._set_client(client)
