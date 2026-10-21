@@ -13,7 +13,7 @@ from lightfall_voice.audio import (
     RATE,
     float32_to_pcm16,
     pcm16_to_float32,
-    resample,
+    StreamResampler,
     rms,
 )
 
@@ -76,9 +76,11 @@ class Recorder(QObject):
         self._io = None
         self._fmt: QAudioFormat | None = None
         self._native = True
+        self._rs: StreamResampler | None = None
         self._raw = bytearray()  # undecoded input (partial frames)
         self._out = bytearray()  # converted 16 kHz mono s16le awaiting chunking
         self._recording = False
+        self._connected = False
 
     @property
     def is_recording(self) -> bool:
@@ -89,6 +91,7 @@ class Recorder(QObject):
             for dev in QMediaDevices.audioInputs():
                 if bytes(dev.id()).decode("utf-8", "replace") == self._device_id:
                     return dev
+            return None
         return QMediaDevices.defaultAudioInput()
 
     def start(self) -> None:
@@ -98,6 +101,9 @@ class Recorder(QObject):
         fmt = _requested_format()
         if self._factory is None:
             device = self._find_device()
+            if device is None:
+                self.failed.emit(f"Microphone not found: {self._device_id}")
+                return
             if device.isNull():
                 self.failed.emit("No microphone found")
                 return
@@ -116,13 +122,20 @@ class Recorder(QObject):
             self.failed.emit(f"Could not open microphone: {getattr(err, 'name', err)}")
             return
         actual = self._source.format() if callable(getattr(self._source, "format", None)) else fmt
+        if actual.sampleFormat() not in _SAMPLE_WIDTHS:
+            self._teardown()
+            self.failed.emit("Unsupported sample format")
+            return
         self._fmt = actual
         self._native = _is_native(actual)
+        self._rs = None if self._native else StreamResampler(actual.sampleRate())
         self._raw.clear()
         self._out.clear()
         self._recording = True
         self._source.stateChanged.connect(self._on_state)
         self._io.readyRead.connect(self._on_ready)
+        self._connected = True
+        self._on_state(None)  # an error raised synchronously by start()
         self._on_ready()  # pick up anything already buffered
 
     def stop(self) -> None:
@@ -136,17 +149,17 @@ class Recorder(QObject):
         self._source = self._io = None
         self._raw.clear()
         self._out.clear()
-        if io is not None:
-            try:
-                io.readyRead.disconnect(self._on_ready)
-            except (RuntimeError, TypeError):
-                pass
+        connected, self._connected = self._connected, False
+        if connected:
+            for sig, slot in ((io.readyRead, self._on_ready), (source.stateChanged, self._on_state)):
+                try:
+                    sig.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass
         if source is not None:
-            try:
-                source.stateChanged.disconnect(self._on_state)
-            except (RuntimeError, TypeError):
-                pass
             source.stop()
+            if hasattr(source, "deleteLater"):
+                source.deleteLater()  # never delete inside its own signal
 
     def _on_state(self, _state) -> None:
         if not self._recording or self._source is None:
@@ -174,7 +187,7 @@ class Recorder(QObject):
                 block = bytes(self._raw[:usable])
                 del self._raw[:usable]
                 mono = _to_mono_float(block, self._fmt)
-                self._out += float32_to_pcm16(resample(mono, self._fmt.sampleRate()))
+                self._out += float32_to_pcm16(self._rs.process(mono))
         while self._recording and len(self._out) >= CHUNK_BYTES:
             piece = bytes(self._out[:CHUNK_BYTES])
             del self._out[:CHUNK_BYTES]

@@ -135,3 +135,66 @@ def test_stop_flushes_nothing_partial(qtbot):
     assert chunks == []
     assert not rec.is_recording
     assert src.stopped
+
+
+def test_unknown_device_id_fails_without_fallback(qtbot):
+    rec = Recorder("no-such-device")
+    errors = []
+    rec.failed.connect(errors.append)
+    rec.start()
+    assert errors == ["Microphone not found: no-such-device"]
+    assert not rec.is_recording
+
+
+def test_float32_stereo_decode(qtbot):
+    fmt = QAudioFormat()
+    fmt.setSampleRate(16000)
+    fmt.setChannelCount(2)
+    fmt.setSampleFormat(QAudioFormat.SampleFormat.Float)
+    holder = {}
+
+    def factory(_f, _d):
+        holder["src"] = FakeSource(fmt)
+        return holder["src"]
+
+    rec = Recorder(source_factory=factory)
+    chunks = []
+    rec.chunk.connect(chunks.append)
+    rec.start()
+    left = np.full(1600, 0.5, dtype="<f4")
+    right = np.full(1600, 0.25, dtype="<f4")
+    holder["src"].pipe.feed(np.stack([left, right], axis=1).tobytes())
+    assert len(chunks) == 1
+    out = np.frombuffer(chunks[0], dtype="<i2").astype(np.float32) / 32768
+    assert abs(float(out.mean()) - 0.375) < 1e-3
+
+
+def test_unsupported_sample_format_fails(qtbot):
+    fmt = QAudioFormat()
+    fmt.setSampleRate(16000)
+    fmt.setChannelCount(1)
+    rec = Recorder(source_factory=lambda _f, _d: FakeSource(fmt))  # Unknown format
+    errors = []
+    rec.failed.connect(errors.append)
+    rec.start()
+    assert errors == ["Unsupported sample format"]
+    assert not rec.is_recording
+
+
+def test_sync_start_error_is_reported(qtbot):
+    fmt = QAudioFormat()
+    fmt.setSampleRate(16000)
+    fmt.setChannelCount(1)
+    fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+
+    def factory(_f, _d):
+        src = FakeSource(fmt)
+        src._error = QAudio.Error.OpenError
+        return src
+
+    rec = Recorder(source_factory=factory)
+    errors = []
+    rec.failed.connect(errors.append)
+    rec.start()
+    assert len(errors) == 1 and "OpenError" in errors[0]
+    assert not rec.is_recording
