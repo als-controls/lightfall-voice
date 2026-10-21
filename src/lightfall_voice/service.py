@@ -8,6 +8,7 @@ is injected and unit-testable without lightfall widgets.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Callable
 
@@ -73,6 +74,47 @@ class VoiceService(QObject):
         # Buffer the latest non-empty message text per agent (by name), so
         # result_received (which carries no message text) can speak it.
         self._last_message: dict[str, str] = {}
+        # hold()/release(): while the counter is > 0 events queue instead of
+        # speaking. The lock guards the counter, queue and drain flag because
+        # agent signals may be delivered off the Qt main thread.
+        self._hold_lock = threading.Lock()
+        self._hold_count = 0
+        self._held: list[tuple[VoiceEvent, float]] = []
+        self._draining = False
+
+    # -- hold / release ----------------------------------------------------
+
+    def hold(self) -> None:
+        """Suspend speaking; events queue until the matching release(). Nests."""
+        with self._hold_lock:
+            self._hold_count += 1
+
+    def release(self) -> None:
+        """Undo one hold(); at zero, speak queued events in order, dropping stale ones."""
+        with self._hold_lock:
+            if self._hold_count == 0:
+                logger.debug("lightfall-voice: release() without matching hold(); ignored")
+                return
+            self._hold_count -= 1
+            if self._hold_count > 0 or self._draining:
+                return
+            self._draining = True
+        # Events arriving mid-drain are appended to the same queue (see
+        # _dispatch), so they are spoken after the older ones, never before.
+        while True:
+            with self._hold_lock:
+                if self._hold_count > 0 or not self._held:
+                    self._draining = False
+                    return
+                event, enqueued_at = self._held.pop(0)
+            try:
+                now = self._clock()
+                ttl = self._ttl_for(event)
+                if ttl is not None and now - enqueued_at > ttl:
+                    continue
+                self._speak_event(event, now)
+            except Exception:
+                logger.exception("lightfall-voice: failed to speak held event")
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -160,13 +202,24 @@ class VoiceService(QObject):
 
     # -- signal handlers (never raise) ---------------------------------------
 
-    def _dispatch(self, event: VoiceEvent) -> None:
-        decision = self._policy.decide(event, now=self._clock())
+    @staticmethod
+    def _ttl_for(event: VoiceEvent) -> float | None:
+        return None if event.priority == "high" else 10.0
+
+    def _speak_event(self, event: VoiceEvent, now: float) -> None:
+        decision = self._policy.decide(event, now=now)
         if decision is None:
             return
         text, voice = decision
-        ttl = None if event.priority == "high" else 10.0
-        self._client.speak(text, voice=voice, ttl=ttl)
+        self._client.speak(text, voice=voice, ttl=self._ttl_for(event))
+
+    def _dispatch(self, event: VoiceEvent) -> None:
+        now = self._clock()
+        with self._hold_lock:
+            if self._hold_count > 0 or self._draining:
+                self._held.append((event, now))
+                return
+        self._speak_event(event, now)
 
     def _on_tool(self, agent_name: str, tool: str, tool_input: dict) -> None:
         try:
