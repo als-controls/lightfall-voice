@@ -171,6 +171,8 @@ class _EscFilter(QObject):
             return False
         if event.key() != Qt.Key.Key_Escape or event.modifiers() != Qt.KeyboardModifier.NoModifier:
             return False
+        if event.isAutoRepeat():
+            return False  # a held Esc: only the first press counts; stay armed
         if obj.window() is not self._window:
             return False
         if etype == QEvent.Type.ShortcutOverride:
@@ -280,6 +282,7 @@ class VoiceInputController(QObject):
             return
         self._abort(None, cancel=True)
         self._started = False
+        self._start_pending = False
         m = self._mgr()
         for sig, slot in (
             (m.client_created, self._on_client_created),
@@ -356,11 +359,14 @@ class VoiceInputController(QObject):
     def apply_settings(self, settings: VoiceInputSettings) -> None:
         """Adopt new settings: hotkey, service start/stop and ``config.set``."""
         old, self._settings = self._settings, settings
-        if self._hotkey_shortcut is not None and settings.hotkey != old.hotkey:
-            self._hotkey_shortcut.setKey(QKeySequence(settings.hotkey))
+        if _alive(self._hotkey_shortcut):
+            if settings.hotkey != old.hotkey:
+                self._hotkey_shortcut.setKey(QKeySequence(settings.hotkey))
+            self._hotkey_shortcut.setEnabled(settings.enabled)  # free the key when off
         if not self._started:
             return
         if old.enabled and not settings.enabled:
+            self._start_pending = False
             self._abort(DISABLED, cancel=True)
             try:
                 self._mgr().stop_service(SERVICE)
@@ -396,6 +402,7 @@ class VoiceInputController(QObject):
     def _ensure_started(self) -> None:
         try:
             self._mgr().ensure_started(SERVICE)
+            self._start_pending = False
         except KeyError:
             # Preload plugins run before service plugins register their descriptors:
             # retry on the next services_changed (see _sync_client).
@@ -531,7 +538,12 @@ class VoiceInputController(QObject):
         sid = reply.get("stream_id") if reply is not None and error is None else None
         if gen != self._gen or self._phase != "starting" or client is not self._client:
             if isinstance(sid, str) and _alive(client):
-                client.call("utterance.cancel", {"stream_id": sid})  # cancelled meanwhile
+                try:  # cancelled meanwhile: free the service's slot
+                    client.call("utterance.cancel", {"stream_id": sid}).add_done_callback(
+                        self._log_failure
+                    )
+                except Exception:
+                    logger.exception("lightfall-voice: utterance.cancel failed")
             return
         if error is not None or not isinstance(sid, str):
             self._finish(error or "Speech service returned no stream id")
@@ -709,13 +721,15 @@ class VoiceInputController(QObject):
             return None
 
     def _install_shortcuts(self) -> None:
-        if self._hotkey_shortcut is not None:
+        if _alive(self._hotkey_shortcut):
             return
+        self._hotkey_shortcut = None
         window = self._window_lookup()
         if window is None:
             return
         hotkey = QShortcut(QKeySequence(self._settings.hotkey), window)
         hotkey.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        hotkey.setEnabled(self._settings.enabled)  # don't take the key while disabled
         hotkey.activated.connect(self._on_hotkey)
         self._hotkey_shortcut = hotkey
 
@@ -787,12 +801,16 @@ class VoiceInputController(QObject):
     # -- helpers ---------------------------------------------------------------------------
 
     def _on_main_thread(self, future: concurrent.futures.Future, fn: Callable) -> None:
+        gen = self._gen  # the utterance this callback belongs to
+
         def deliver(f: concurrent.futures.Future) -> None:
-            invoke_in_main_thread(self._run_guarded, fn, f)
+            invoke_in_main_thread(self._run_guarded, fn, f, gen)
 
         future.add_done_callback(deliver)
 
-    def _run_guarded(self, fn: Callable, future: concurrent.futures.Future) -> None:
+    def _run_guarded(
+        self, fn: Callable, future: concurrent.futures.Future, gen: int | None = None
+    ) -> None:
         if not _alive(self):
             return
         try:
@@ -800,8 +818,9 @@ class VoiceInputController(QObject):
         except Exception as e:
             logger.exception("lightfall-voice: voice input callback failed")
             # Never leave an utterance half-started: a raise after the stream id is known
-            # (recorder creation, signal wiring) would otherwise leak the hold.
-            if self._phase != "idle":
+            # (recorder creation, signal wiring) would otherwise leak the hold.  Only the
+            # callback's own utterance is aborted, never a newer one.
+            if self._phase != "idle" and (gen is None or gen == self._gen):
                 self._abort(f"Voice input failed: {e}", cancel=True)
 
     @staticmethod

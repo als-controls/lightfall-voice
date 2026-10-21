@@ -161,3 +161,29 @@ def test_save_without_controller_only_persists(qtbot):
     plugin._silence_spin.setValue(2.0)
     plugin.save_settings()
     assert prefs.data["voice.input.silence_s"] == 2.0
+
+
+def test_voice_service_failure_still_starts_voice_input():
+    prefs = FakePrefs(enabled=True)
+    plugin = make_plugin(prefs)
+    with (
+        patch.object(service_module, "VoiceService", side_effect=RuntimeError("no daemon")),
+        patch.object(settings_module.controller_module, "VoiceInputController") as ctl_cls,
+    ):
+        plugin.on_loaded()
+    assert ctl_cls.call_args.args[1] is None  # voice_service=None: no holds
+    ctl_cls.return_value.start.assert_called_once_with()
+    assert settings_module.get_controller() is ctl_cls.return_value
+
+
+def test_controller_start_failure_stops_and_drops_it():
+    prefs = FakePrefs(enabled=True)
+    plugin = make_plugin(prefs)
+    with (
+        patch.object(service_module, "VoiceService"),
+        patch.object(settings_module.controller_module, "VoiceInputController") as ctl_cls,
+    ):
+        ctl_cls.return_value.start.side_effect = RuntimeError("boom")
+        plugin.on_loaded()
+    ctl_cls.return_value.stop.assert_called_once_with()
+    assert settings_module.get_controller() is None

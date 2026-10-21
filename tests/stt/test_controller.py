@@ -672,3 +672,124 @@ def test_enabled_start_retries_until_service_registered(qtbot):
     manager.services_changed.emit()
     assert manager.started == ["stt"]  # only once
     ctl.stop()
+
+
+def test_hotkey_disabled_while_voice_input_disabled(qtbot):
+    r = Rig(qtbot, enabled=False, client=False)
+    try:
+        hotkey = r.ctl._hotkey_shortcut
+        assert hotkey is not None and not hotkey.isEnabled()  # F9 is free for others
+        r.ctl.apply_settings(VoiceInputSettings(enabled=True))
+        assert hotkey.isEnabled()
+        r.ctl.apply_settings(VoiceInputSettings(enabled=False))
+        assert not hotkey.isEnabled()
+        r.ctl.rescan()
+        assert r.ctl._hotkey_shortcut is hotkey  # installed once
+    finally:
+        r.ctl.stop()
+
+
+def test_hotkey_enabled_when_started_enabled(rig):
+    assert rig.ctl._hotkey_shortcut.isEnabled()
+
+
+def test_stale_callback_failure_does_not_abort_current_utterance(rig, qtbot):
+    pending: concurrent.futures.Future = concurrent.futures.Future()
+    real_call = rig.client.call
+    rig.client.call = lambda action, payload, timeout=10.0: pending
+    w = rig.widgets[0]
+    w.button.click()  # starting, reply outstanding
+    rig.ctl.cancel()
+    assert rig.ctl.state == "idle"
+
+    def call(action, payload, timeout=10.0):
+        if action == "utterance.cancel":
+            raise RuntimeError("client gone")
+        return real_call(action, payload, timeout)
+
+    rig.client.call = call
+    rig.client.replies["utterance.start"] = {"status": "ok", "stream_id": "s2"}
+    w.button.click()
+    assert rig.ctl.state == "listening"
+    # the stale reply arrives now; its utterance.cancel raises
+    pending.set_result({"status": "ok", "stream_id": "s1"})
+    qtbot.wait(50)
+    assert rig.ctl.state == "listening"
+    assert rig.ctl._sid == "s2"
+
+
+def test_run_guarded_aborts_only_its_own_generation(rig):
+    def boom(_f):
+        raise RuntimeError("late failure")
+
+    rig.widgets[0].button.click()
+    assert rig.ctl.state == "listening"
+    rig.ctl._run_guarded(boom, _done(None), rig.ctl._gen - 1)
+    assert rig.ctl.state == "listening"
+    rig.ctl._run_guarded(boom, _done(None), rig.ctl._gen)
+    assert rig.ctl.state == "idle"
+    assert rig.voice.held == 0
+
+
+def test_esc_autorepeat_ignored_and_filter_stays_armed(rig):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+
+    rig.widgets[0].button.click()
+    esc = rig.ctl._esc_filter
+    ev = QKeyEvent(
+        QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier, "", True
+    )
+    assert ev.isAutoRepeat()
+    assert esc.eventFilter(rig.window, ev) is False
+    assert esc._armed
+    assert rig.ctl.state == "listening"
+    QTest.keyClick(rig.window, Qt.Key.Key_Escape)
+    assert rig.ctl.state == "idle"
+
+
+class _LateManager(FakeManager):
+    registered = False
+
+    def ensure_started(self, name):
+        if not self.registered:
+            raise KeyError(name)
+        super().ensure_started(name)
+
+
+def _late_controller(enabled=True):
+    manager = _LateManager()
+    ctl = VoiceInputController(
+        VoiceInputSettings(enabled=enabled),
+        None,
+        manager=manager,
+        widget_scanner=lambda: [],
+        window_lookup=lambda: None,
+    )
+    return manager, ctl
+
+
+def test_start_pending_cleared_when_disabled():
+    manager, ctl = _late_controller()
+    ctl.start()
+    assert ctl._start_pending
+    ctl.apply_settings(VoiceInputSettings(enabled=False))
+    assert not ctl._start_pending
+    manager.registered = True
+    manager.services_changed.emit()
+    assert manager.started == []  # disabled meanwhile: no late start
+    ctl.stop()
+
+
+def test_start_pending_cleared_on_stop_and_success():
+    manager, ctl = _late_controller()
+    ctl.start()
+    assert ctl._start_pending
+    ctl.stop()
+    assert not ctl._start_pending
+
+    manager.registered = True
+    ctl._start_pending = True
+    ctl._ensure_started()
+    assert manager.started == ["stt"]
+    assert not ctl._start_pending

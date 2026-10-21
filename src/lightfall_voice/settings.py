@@ -91,14 +91,16 @@ class VoiceSettingsPlugin(SettingsPlugin):
         return self._prefs
 
     def on_loaded(self) -> None:
+        service = None
         try:
             settings = VoiceSettings.from_preferences(self._preferences())
             service = service_module.VoiceService(settings)
             service.start()
             service_module.set_service(service)
         except Exception:
+            # Voice input does not need spoken notifications: carry on without holds.
             logger.exception("lightfall-voice: failed to start VoiceService")
-            return
+            service = None
         self._start_voice_input(service)
 
     def _start_voice_input(self, service) -> None:
@@ -109,12 +111,28 @@ class VoiceSettingsPlugin(SettingsPlugin):
         on the first AgentBus ``agents_changed`` (the main window exists by then), and
         ``ensure_started("stt")`` is retried on ``services_changed`` until the ``stt``
         descriptor is registered.  ``stop()`` runs on ``aboutToQuit``.
+
+        ``service`` may be None (VoiceService failed): the controller then skips the
+        notification hold/release. A controller whose ``start()`` raises is stopped and
+        dropped.
         """
         try:
             controller = controller_module.VoiceInputController(
                 VoiceInputSettings.from_preferences(self._preferences()), service
             )
+        except Exception:
+            logger.exception("lightfall-voice: failed to start voice input")
+            return
+        try:
             controller.start()
+        except Exception:
+            logger.exception("lightfall-voice: failed to start voice input")
+            try:
+                controller.stop()
+            except Exception:
+                logger.exception("lightfall-voice: stopping the failed controller failed")
+            return
+        try:
             set_controller(controller)
             app = QCoreApplication.instance()
             if app is not None:
