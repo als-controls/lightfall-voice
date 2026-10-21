@@ -12,7 +12,10 @@ def _free_port() -> int:
 @pytest.fixture(scope="module")
 def broker_url():
     from lightfall_utils.ipc import LocalNatsServer
+    from lightfall_utils.ipc.local_server import resolve_nats_binary
 
+    if resolve_nats_binary() is None:
+        pytest.skip("nats-server is not installed")
     port = _free_port()
     server = LocalNatsServer(port=port, host="127.0.0.1")
     server.start(timeout_s=10.0)
