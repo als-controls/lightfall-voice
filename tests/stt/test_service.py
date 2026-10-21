@@ -1,0 +1,556 @@
+"""The stt ServiceHost, in process, against a real local broker and a fake transcriber."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+import sys
+import threading
+
+import numpy as np
+import pytest
+
+from lightfall_utils.ipc.services.client import ServiceClient
+from lightfall_utils.ipc.services.core import NatsCore
+from lightfall_utils.ipc.services.descriptor import ServiceDescriptor
+from lightfall_voice.audio import CHUNK_SAMPLES, RATE, float32_to_pcm16
+from lightfall_voice.stt_service.service import INSTALL_HINT, make_host
+
+SCOPE = "lfstt"
+START = {"rate": 16000, "format": "s16le", "channels": 1}
+EVENTS = ("listening", "ended", "transcript", "error")
+
+
+class FakeTranscriber:
+    device = "cpu"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.calls: list[tuple[int, str | None]] = []
+
+    def transcribe(self, audio_16k, language):
+        self.calls.append((len(audio_16k), language))
+        return self.text
+
+
+class Factory:
+    """A transcriber_factory recording its calls; optionally blocks until released."""
+
+    def __init__(self, text: str = "hello world", *, block: bool = False) -> None:
+        self.text = text
+        self.calls: list[dict] = []
+        self.made: list[FakeTranscriber] = []
+        self.gate = threading.Event()
+        if not block:
+            self.gate.set()
+
+    def __call__(self, **cfg):
+        self.calls.append(cfg)
+        cfg["progress"]("loading")
+        self.gate.wait(10)
+        t = FakeTranscriber(self.text)
+        self.made.append(t)
+        return t
+
+
+def _tone(seconds, amp=0.3):
+    t = np.arange(int(seconds * RATE)) / RATE
+    return (amp * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+
+def _zeros(seconds):
+    return np.zeros(int(seconds * RATE), dtype=np.float32)
+
+
+def _chunks(audio):
+    return [
+        float32_to_pcm16(audio[i : i + CHUNK_SAMPLES])
+        for i in range(0, len(audio), CHUNK_SAMPLES)
+    ]
+
+
+async def _until(pred, timeout=5.0):
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    while not pred():
+        if loop.time() > end:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.01)
+
+
+class Rig:
+    def __init__(self, host, svc, cli, client):
+        self.host, self.svc, self.cli, self.client = host, svc, cli, client
+        self.events: list[tuple[str, dict]] = []
+        for name in EVENTS:
+            client.on_event(
+                f"utterance.{name}", lambda ev, n=name: self.events.append((n, ev))
+            )
+
+    def names(self, sid=None):
+        return [n for n, ev in self.events if sid is None or ev.get("stream_id") == sid]
+
+    def get(self, name):
+        return [ev for n, ev in self.events if n == name]
+
+    async def ready(self):
+        await _until(lambda: self.host.summary.get("status") == "ready")
+
+    async def start(self):
+        reply = await self.client.call("utterance.start", START)
+        assert reply["status"] == "ok", reply
+        sid = reply["stream_id"]
+        self.client.adopt_stream(sid, "audio")
+        return sid
+
+    async def send(self, sid, audio, seq0=0):
+        seq = seq0
+        for chunk in _chunks(audio):
+            if sid not in self.client.streams:
+                break
+            await self.client.send_chunk(sid, seq, chunk)
+            seq += 1
+        return seq
+
+    async def close(self):
+        await self.client.close()
+        await self.host.stop()
+        await self.svc.close()
+        await self.cli.close()
+
+
+async def _rig(broker_url, factory=None, *, session_token=None, **kw):
+    kw.setdefault("heartbeat_s", 0.1)
+    kw.setdefault("single_instance", False)
+    host = make_host(SCOPE, transcriber_factory=factory, **kw)
+    svc = NatsCore(broker_url)
+    await svc.connect()
+    await host.start(svc)
+    cli = NatsCore(broker_url)
+    await cli.connect()
+    desc = ServiceDescriptor(name="stt", scope=SCOPE, contract="1.0", launch="external")
+    client = ServiceClient(
+        desc,
+        cli,
+        scope=SCOPE,
+        app_name="tester",
+        app_version="1.0",
+        session_token=session_token,
+    )
+    rig = Rig(host, svc, cli, client)
+    await client.start()
+    return rig
+
+
+def _run(coro):
+    return asyncio.run(asyncio.wait_for(coro, 30))
+
+
+def test_stream_tone_silence_gives_transcript_event(broker_url):
+    fac = Factory("hello world")
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            sid = await r.start()
+            await r.send(sid, np.concatenate([_tone(1.0), _zeros(1.5)]))
+            await _until(lambda: "transcript" in r.names())
+            return r, sid
+        finally:
+            await r.close()
+
+    r, sid = _run(go())
+    assert r.names(sid) == ["listening", "ended", "transcript"]
+    assert r.get("ended")[0]["reason"] == "silence"
+    assert r.get("transcript")[0] == {
+        **r.get("transcript")[0],
+        "stream_id": sid,
+        "text": "hello world",
+    }
+    (t,) = fac.made
+    ((n, lang),) = t.calls
+    assert lang == "en"
+    assert n >= int(1.9 * RATE)
+
+
+def test_near_silence_hallucination_sends_empty_transcript(broker_url):
+    fac = Factory("Thank you.")
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            sid = await r.start()
+            await r.send(sid, np.concatenate([_tone(1.0), _zeros(1.5)]))
+            await _until(lambda: "transcript" in r.names())
+            return r
+        finally:
+            await r.close()
+
+    r = _run(go())
+    assert r.get("transcript")[0]["text"] == ""
+
+
+def test_second_start_is_busy(broker_url):
+    async def go():
+        r = await _rig(broker_url, Factory())
+        try:
+            await r.ready()
+            await r.start()
+            return await r.client.call("utterance.start", START)
+        finally:
+            await r.close()
+
+    reply = _run(go())
+    assert reply["status"] == "error"
+    assert reply["code"] == "busy"
+
+
+def test_bad_audio_format_rejected(broker_url):
+    async def go():
+        r = await _rig(broker_url, Factory())
+        try:
+            await r.ready()
+            return await r.client.call("utterance.start", {**START, "rate": 44100})
+        finally:
+            await r.close()
+
+    reply = _run(go())
+    assert reply["code"] == "bad_request"
+
+
+def test_client_stream_open_of_audio_refused(broker_url):
+    async def go():
+        r = await _rig(broker_url, Factory())
+        try:
+            await r.ready()
+            return await r.client.call(
+                "stream.open", {"kind": "audio", "params": START}
+            )
+        finally:
+            await r.close()
+
+    reply = _run(go())
+    assert reply["status"] == "error"
+
+
+def test_cancel_emits_ended_cancel_no_transcript(broker_url):
+    fac = Factory()
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            sid = await r.start()
+            await r.send(sid, _tone(0.8))
+            await _until(lambda: "listening" in r.names())
+            reply = await r.client.call("utterance.cancel", {"stream_id": sid})
+            await _until(lambda: "ended" in r.names())
+            await asyncio.sleep(0.3)
+            again = await r.client.call("utterance.start", START)  # no longer busy
+            return r, sid, reply, again
+        finally:
+            await r.close()
+
+    r, sid, reply, again = _run(go())
+    assert reply["status"] == "ok"
+    assert r.names(sid) == ["listening", "ended"]
+    assert r.get("ended")[0]["reason"] == "cancel"
+    assert fac.made[0].calls == []
+    assert again["status"] == "ok"
+
+
+def test_no_speech(broker_url):
+    fac = Factory()
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            sid = await r.start()
+            await r.send(sid, _zeros(8.5))
+            await _until(lambda: "ended" in r.names())
+            await asyncio.sleep(0.3)
+            return r, sid
+        finally:
+            await r.close()
+
+    r, sid = _run(go())
+    assert r.names(sid) == ["ended"]
+    assert r.get("ended")[0]["reason"] == "no_speech"
+    assert fac.made[0].calls == []
+
+
+def test_stop_finalizes_early(broker_url):
+    fac = Factory("stop here")
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            sid = await r.start()
+            await r.send(sid, _tone(1.0))
+            reply = await r.client.call("utterance.stop", {"stream_id": sid})
+            await _until(lambda: "transcript" in r.names())
+            return r, sid, reply
+        finally:
+            await r.close()
+
+    r, sid, reply = _run(go())
+    assert reply["status"] == "ok"
+    assert r.names(sid) == ["listening", "ended", "transcript"]
+    assert r.get("ended")[0]["reason"] == "stop"
+    assert r.get("transcript")[0]["text"] == "stop here"
+    ((n, _lang),) = fac.made[0].calls
+    assert n == RATE  # every chunk sent before stop was transcribed
+
+
+def test_transcription_error_emits_error(broker_url):
+    class Boom(Factory):
+        def __call__(self, **cfg):
+            t = super().__call__(**cfg)
+
+            def fail(audio, language):
+                raise RuntimeError("decoder exploded")
+
+            t.transcribe = fail
+            return t
+
+    async def go():
+        r = await _rig(broker_url, Boom())
+        try:
+            await r.ready()
+            sid = await r.start()
+            await r.send(sid, _tone(1.0))
+            await r.client.call("utterance.stop", {"stream_id": sid})
+            await _until(lambda: "error" in r.names())
+            return r, sid
+        finally:
+            await r.close()
+
+    r, sid = _run(go())
+    assert "transcript" not in r.names()
+    err = r.get("error")[0]
+    assert err["stream_id"] == sid
+    assert "decoder exploded" in err["message"]
+
+
+def test_not_ready_rejects_start(broker_url):
+    fac = Factory(block=True)
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await _until(lambda: fac.calls)
+            reply = await r.client.call("utterance.start", START)
+            fac.gate.set()
+            await r.ready()
+            return reply
+        finally:
+            fac.gate.set()
+            await r.close()
+
+    reply = _run(go())
+    assert reply["status"] == "error"
+    assert reply["code"] == "unknown"
+    assert "model not ready" in reply["message"]
+
+
+def test_config_set_reloads_model(broker_url):
+    fac = Factory()
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            lang = await r.client.call(
+                "config.set", {"language": "de", "silence_s": 0.7}
+            )
+            await asyncio.sleep(0.2)
+            n_after_lang = len(fac.calls)
+            reply = await r.client.call(
+                "config.set", {"model": "base", "device": "cpu"}
+            )
+            await _until(lambda: len(fac.calls) == 2)
+            await r.ready()
+            got = await r.client.call("config.get", {})
+            return r, lang, n_after_lang, reply, got
+        finally:
+            await r.close()
+
+    r, lang, n_after_lang, reply, got = _run(go())
+    assert lang["status"] == "ok"
+    assert n_after_lang == 1  # language / silence_s apply without a reload
+    assert reply["status"] == "ok"
+    assert fac.calls[1]["model"] == "base"
+    assert fac.calls[1]["device"] == "cpu"
+    assert got["model"] == "base"
+    assert got["language"] == "de"
+    assert got["silence_s"] == 0.7
+    assert r.host.summary["model"] == "base"
+
+
+def test_config_set_validates(broker_url):
+    async def go():
+        r = await _rig(broker_url, Factory())
+        try:
+            await r.ready()
+            return [
+                await r.client.call("config.set", {"device": "tpu"}),
+                await r.client.call("config.set", {"silence_s": -1}),
+                await r.client.call("config.set", {"model": ""}),
+            ]
+        finally:
+            await r.close()
+
+    for reply in _run(go()):
+        assert reply["code"] == "bad_request"
+
+
+def test_auth_without_stdin_token_refused(broker_url):
+    async def go():
+        r = await _rig(broker_url, Factory(), stdin_token="t")
+        try:
+            await asyncio.sleep(0.2)
+            return r.client.health, r.client.last_error, r.host.sessions
+        finally:
+            await r.close()
+
+    health, err, sessions = _run(go())
+    assert health == "unauthorized"
+    assert "token" in err
+    assert sessions == {}
+
+
+def test_summary_status_transitions(broker_url):
+    fac = Factory(block=True)
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await _until(lambda: fac.calls)
+            before = (r.host.state, dict(r.host.summary))
+            await _until(
+                lambda: (
+                    (r.client.info or {}).get("summary", {}).get("status") == "loading"
+                )
+            )
+            fac.gate.set()
+            await r.ready()
+            await _until(
+                lambda: (
+                    (r.client.info or {}).get("summary", {}).get("status") == "ready"
+                )
+            )
+            return before, (r.host.state, dict(r.host.summary))
+        finally:
+            fac.gate.set()
+            await r.close()
+
+    (s0, sum0), (s1, sum1) = _run(go())
+    assert s0 == "starting"
+    assert sum0 == {"model": "small", "device": "", "status": "loading", "error": ""}
+    assert s1 == "ready"
+    assert sum1 == {"model": "small", "device": "cpu", "status": "ready", "error": ""}
+
+
+def test_missing_faster_whisper_reports_install_hint(broker_url, monkeypatch):
+    monkeypatch.delenv("LIGHTFALL_STT_FAKE", raising=False)
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)
+
+    async def go():
+        r = await _rig(broker_url)  # the real factory
+        try:
+            await _until(lambda: r.host.summary.get("status") == "error")
+            cfg = await r.client.call("config.get", {})
+            start = await r.client.call("utterance.start", START)
+            return r.host.state, dict(r.host.summary), r.client.health, cfg, start
+        finally:
+            await r.close()
+
+    state, summary, health, cfg, start = _run(go())
+    assert state == "error"
+    assert summary["status"] == "error"
+    assert summary["error"] == INSTALL_HINT == "Install lightfall-voice[stt-service]"
+    assert health == "up"  # the service stays up so the mic can show the reason
+    assert cfg["status"] == "ok"
+    assert start["code"] == "unknown"
+
+
+def test_subprocess_with_fake_env(broker_url):
+    """``LIGHTFALL_STT_FAKE`` (test-only) makes ``python -m lightfall_voice.stt_service`` use
+    a fake transcriber."""
+    env = {**os.environ, "LIGHTFALL_STT_FAKE": "from the subprocess"}
+    scope = "lfsttproc"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "lightfall_voice.stt_service",
+            "--scope",
+            scope,
+            "--nats-url",
+            broker_url,
+            "--token-stdin",
+        ],
+        stdin=subprocess.PIPE,
+        env=env,
+    )
+    proc.stdin.write(b"tok123\n")
+    proc.stdin.flush()
+
+    async def go():
+        cli = NatsCore(broker_url)
+        await cli.connect()
+        desc = ServiceDescriptor(
+            name="stt", scope=scope, contract="1.0", launch="external"
+        )
+        client = ServiceClient(
+            desc,
+            cli,
+            scope=scope,
+            app_name="t",
+            app_version="1",
+            session_token="tok123",
+        )
+        texts: list[str] = []
+        client.on_event("utterance.transcript", lambda ev: texts.append(ev["text"]))
+        try:
+            await client.start()
+            await _until(lambda: client.health == "up", 15)
+            await _until(
+                lambda: (client.info or {}).get("summary", {}).get("status") == "ready",
+                15,
+            )
+            reply = await client.call("utterance.start", START)
+            sid = reply["stream_id"]
+            client.adopt_stream(sid, "audio")
+            for seq, chunk in enumerate(_chunks(_tone(1.0))):
+                await client.send_chunk(sid, seq, chunk)
+            await client.call("utterance.stop", {"stream_id": sid})
+            await _until(lambda: texts, 10)
+            await client.call("shutdown", {})
+            return texts
+        finally:
+            await client.close()
+            await cli.close()
+
+    try:
+        texts = asyncio.run(asyncio.wait_for(go(), 40))
+        proc.stdin.close()
+        assert proc.wait(15) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert texts == ["from the subprocess"]
+
+
+@pytest.mark.parametrize("mod", ["lightfall_voice.stt_service.service"])
+def test_service_imports_without_faster_whisper(mod):
+    code = (
+        "import sys; sys.modules['faster_whisper'] = None; sys.modules['ctranslate2'] = None; "
+        f"import {mod}"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
