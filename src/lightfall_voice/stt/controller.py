@@ -29,8 +29,9 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 import shiboken6
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import QApplication, QWidget
 
 from lightfall.utils.logging import logger
 from lightfall_utils.threads import initialize_main_thread_invoker, invoke_in_main_thread
@@ -60,6 +61,8 @@ NO_RESPONSE = "Speech service did not respond"
 _UNAVAILABLE_HEALTH = frozenset({"down", "incompatible", "unauthorized"})
 _SHOW_MS = 120_000  # placeholder "flash" long enough to outlast an utterance
 _TRANSCRIBE_TIMEOUT_MS = 120_000  # give up waiting for a transcript after this long
+# give up listening after the service's 60 s utterance cap plus a 10 s margin
+_LISTEN_TIMEOUT_MS = 70_000
 
 _PREFIX = "voice.input."
 
@@ -140,6 +143,44 @@ def _reply(future: concurrent.futures.Future) -> tuple[dict | None, str | None]:
     return reply, None
 
 
+class _EscFilter(QObject):
+    """While listening, a bare Esc anywhere in ``window`` cancels the recording.
+
+    An application event filter rather than a ``QShortcut``: with another Esc shortcut in
+    the same window (TheaterOverlay's), Qt treats both as ambiguous and delivers
+    ``activatedAmbiguously`` to only one of them per press, in rotation, so a shortcut of
+    ours could miss the first Esc.  Accepting the ``ShortcutOverride`` keeps Esc out of the
+    shortcut map for that window, and the following ``KeyPress`` is consumed here.  Other
+    windows (dialogs included) are untouched, and the filter exists only while listening.
+    """
+
+    def __init__(self, window, on_escape: Callable[[], None]) -> None:
+        super().__init__()
+        self._window = window
+        self._on_escape = on_escape
+        self._armed = True
+
+    def disarm(self) -> None:
+        self._armed = False
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt override
+        etype = event.type()
+        if not self._armed or etype not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+            return False
+        if not isinstance(obj, QWidget) or not _alive(self._window):
+            return False
+        if event.key() != Qt.Key.Key_Escape or event.modifiers() != Qt.KeyboardModifier.NoModifier:
+            return False
+        if obj.window() is not self._window:
+            return False
+        if etype == QEvent.Type.ShortcutOverride:
+            event.accept()  # deliver Esc as a key press instead of a shortcut
+            return True
+        self._armed = False
+        self._on_escape()
+        return True
+
+
 class VoiceInputController(QObject):
     """Push-to-talk voice input for agent sessions (see the module docstring)."""
 
@@ -165,18 +206,21 @@ class VoiceInputController(QObject):
         self._window_lookup = window_lookup or _default_window_lookup
         self._panel_lookup = panel_lookup or self._default_panel_lookup
         if widget_scanner is None:
-            from lightfall_voice.service import _default_widget_scanner
+            from lightfall_voice.service import default_widget_scanner
 
-            widget_scanner = _default_widget_scanner
+            widget_scanner = default_widget_scanner
         self._scan = widget_scanner
 
         self._started = False
         self._bus = None
+        # Keyed by id(widget); the entry also keeps the widget, so a reused id (the old
+        # widget was destroyed without _forget_widget running) is detected in
+        # attach_widget by the identity check, and destroyed widgets are popped.
         self._buttons: dict[int, tuple[QObject, MicButton]] = {}
         self._client = None
         self._client_conns: list[tuple[Any, Callable]] = []
         self._hotkey_shortcut: QShortcut | None = None
-        self._esc_shortcut: QShortcut | None = None
+        self._esc_filter: _EscFilter | None = None
 
         self._state: State = "unavailable"
         self._tooltip = DISABLED
@@ -192,7 +236,6 @@ class VoiceInputController(QObject):
         self._shown: str | None = None  # placeholder currently shown on the target
         self._watchdog = QTimer(self)
         self._watchdog.setSingleShot(True)
-        self._watchdog.setInterval(_TRANSCRIBE_TIMEOUT_MS)
         self._watchdog.timeout.connect(self._on_watchdog)
 
     # -- public API ------------------------------------------------------------------------
@@ -246,11 +289,11 @@ class VoiceInputController(QObject):
             self._disconnect(self._bus.agents_changed, self.rescan)
             self._bus = None
         self._set_client(None)
-        for sc in (self._hotkey_shortcut, self._esc_shortcut):
-            if _alive(sc):
-                sc.setEnabled(False)
-                sc.deleteLater()
-        self._hotkey_shortcut = self._esc_shortcut = None
+        self._remove_esc()
+        if _alive(self._hotkey_shortcut):
+            self._hotkey_shortcut.setEnabled(False)
+            self._hotkey_shortcut.deleteLater()
+        self._hotkey_shortcut = None
         for _w, button in self._buttons.values():
             if _alive(button):
                 button.setParent(None)
@@ -493,6 +536,8 @@ class VoiceInputController(QObject):
         self._recorder = recorder
         self._phase = "listening"
         self._show(LISTENING)
+        self._install_esc(self._target)
+        self._watchdog.start(_LISTEN_TIMEOUT_MS)
         self._refresh()
         recorder.start()  # may emit failed synchronously
 
@@ -509,9 +554,10 @@ class VoiceInputController(QObject):
 
     def _enter_transcribing(self) -> None:
         self._stop_recorder()
+        self._remove_esc()
         self._phase = "transcribing"
         self._show(TRANSCRIBING)
-        self._watchdog.start()
+        self._watchdog.start(_TRANSCRIBE_TIMEOUT_MS)
         self._refresh()
 
     def _on_chunk(self, data: bytes) -> None:
@@ -523,6 +569,9 @@ class VoiceInputController(QObject):
         client.send_chunk(self._sid, seq, bytes(data)).add_done_callback(self._log_failure)
 
     def _on_event(self, name: str, payload: dict) -> None:
+        # Events are dropped while "starting": the stream id is unknown until the
+        # utterance.start reply arrives, and the service sends nothing for a stream before
+        # it receives audio, which only flows once we are listening.
         if self._phase not in ("listening", "transcribing"):
             return
         payload = payload if isinstance(payload, dict) else {}
@@ -555,7 +604,7 @@ class VoiceInputController(QObject):
         self._abort(reason or "Microphone failed", cancel=True)
 
     def _on_watchdog(self) -> None:
-        if self._phase == "transcribing":
+        if self._phase in ("listening", "transcribing"):
             self._abort(NO_RESPONSE, cancel=True)
 
     def _abort(self, flash: str | None, *, cancel: bool) -> None:
@@ -576,6 +625,7 @@ class VoiceInputController(QObject):
         self._gen += 1
         self._watchdog.stop()
         self._stop_recorder()
+        self._remove_esc()
         target, shown = self._target, self._shown
         self._phase = "idle"
         self._sid = None
@@ -659,11 +709,31 @@ class VoiceInputController(QObject):
         hotkey = QShortcut(QKeySequence(self._settings.hotkey), window)
         hotkey.setContext(Qt.ShortcutContext.ApplicationShortcut)
         hotkey.activated.connect(self._on_hotkey)
-        esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), window)
-        esc.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        esc.setEnabled(self._phase == "listening")
-        esc.activated.connect(self.cancel)
-        self._hotkey_shortcut, self._esc_shortcut = hotkey, esc
+        self._hotkey_shortcut = hotkey
+
+    def _install_esc(self, target) -> None:
+        """Esc cancels while listening, in the target's own window only (see _EscFilter)."""
+        self._remove_esc()
+        window_of = getattr(target, "window", None)
+        window = window_of() if callable(window_of) else None
+        if window is None:
+            window = self._window_lookup()
+        app = QApplication.instance()
+        if window is None or app is None:
+            return
+        esc = _EscFilter(window, self.cancel)
+        app.installEventFilter(esc)
+        self._esc_filter = esc
+
+    def _remove_esc(self) -> None:
+        esc, self._esc_filter = self._esc_filter, None
+        if not _alive(esc):
+            return
+        esc.disarm()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(esc)
+        esc.deleteLater()  # may be inside its own eventFilter call
 
     def _on_hotkey(self) -> None:
         self.toggle()
@@ -705,8 +775,6 @@ class VoiceInputController(QObject):
                     button.set_state(state, tip)
             else:
                 button.set_state("idle", ELSEWHERE, enabled=False)
-        if _alive(self._esc_shortcut):
-            self._esc_shortcut.setEnabled(phase == "listening")
 
     # -- helpers ---------------------------------------------------------------------------
 
@@ -721,8 +789,12 @@ class VoiceInputController(QObject):
             return
         try:
             fn(future)
-        except Exception:
+        except Exception as e:
             logger.exception("lightfall-voice: voice input callback failed")
+            # Never leave an utterance half-started: a raise after the stream id is known
+            # (recorder creation, signal wiring) would otherwise leak the hold.
+            if self._phase != "idle":
+                self._abort(f"Voice input failed: {e}", cancel=True)
 
     @staticmethod
     def _log_failure(future: concurrent.futures.Future) -> None:

@@ -5,8 +5,10 @@ from __future__ import annotations
 import concurrent.futures
 
 import pytest
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QMainWindow
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLineEdit, QMainWindow
 
 from lightfall_voice.stt.controller import VoiceInputController, VoiceInputSettings
 from lightfall_voice.stt.mic_button import MicButton
@@ -115,11 +117,15 @@ class FakeRecorder(QObject):
 
 
 class FakeWidget(QObject):
-    def __init__(self):
+    def __init__(self, window=None):
         super().__init__()
+        self._window = window
         self.accessories: list = []
         self.submitted: list[str] = []
         self.flashes: list[tuple[str, int]] = []
+
+    def window(self):
+        return self._window
 
     def add_input_accessory(self, w):
         self.accessories.append(w)
@@ -167,7 +173,7 @@ class Rig:
     def __init__(self, qtbot, *, widgets=2, enabled=True, client=True):
         self.window = QMainWindow()
         qtbot.addWidget(self.window)
-        self.widgets = [FakeWidget() for _ in range(widgets)]
+        self.widgets = [FakeWidget(self.window) for _ in range(widgets)]
         self.panel = FakePanel()
         self.panel.current = self.widgets[0] if self.widgets else None
         self.voice = FakeVoice()
@@ -249,17 +255,26 @@ def test_auto_stop_on_silence_event_then_transcript_submits_to_origin_widget(rig
 
 def test_esc_cancels_nothing_sent(rig):
     w = rig.widgets[0]
+    assert rig.ctl._esc_filter is None  # only exists while listening
     w.button.click()
-    assert rig.ctl._esc_shortcut.isEnabled()
-    rig.ctl._esc_shortcut.activated.emit()
+    assert rig.ctl._esc_filter is not None
+    QTest.keyClick(rig.window, Qt.Key.Key_Escape)
     assert rig.client.calls[-1] == ("utterance.cancel", {"stream_id": "s1"})
     assert not rig.rec.recording
     assert rig.ctl.state == "idle"
-    assert not rig.ctl._esc_shortcut.isEnabled()
+    assert rig.ctl._esc_filter is None
     # a late transcript for the cancelled stream is dropped
     rig.emit("utterance.transcript", stream_id="s1", text="hello")
     assert w.submitted == []
     assert rig.voice.held == 0
+
+
+def test_esc_in_another_window_does_not_cancel(rig, qtbot):
+    other = QMainWindow()
+    qtbot.addWidget(other)
+    rig.widgets[0].button.click()
+    QTest.keyClick(other, Qt.Key.Key_Escape)
+    assert rig.ctl.state == "listening"
 
 
 def test_empty_transcript_flashes(rig):
@@ -562,3 +577,69 @@ def test_start_reply_from_worker_thread_is_handled_on_main_thread(rig, qtbot):
     qtbot.waitUntil(lambda: rig.ctl.state == "listening", timeout=2000)
     assert seen == [True]
     assert rig.client.adopted == [("s9", "audio")]
+
+
+def test_esc_cancels_despite_another_esc_shortcut_in_the_window(rig, qtbot):
+    other_fired: list[bool] = []
+    other = QShortcut(QKeySequence(Qt.Key.Key_Escape), rig.window)
+    other.setContext(Qt.ShortcutContext.WindowShortcut)
+    other.activated.connect(lambda: other_fired.append(True))
+    edit = QLineEdit()
+    rig.window.setCentralWidget(edit)
+    rig.window.show()
+    rig.window.activateWindow()
+    qtbot.waitUntil(lambda: QApplication.activeWindow() is rig.window, timeout=2000)
+
+    rig.widgets[0].button.click()
+    assert rig.ctl.state == "listening"
+    QTest.keyClick(edit, Qt.Key.Key_Escape)  # first press, focus in a child
+    assert rig.ctl.state == "idle"
+    assert rig.client.calls[-1] == ("utterance.cancel", {"stream_id": "s1"})
+    assert rig.voice.held == 0
+    assert other_fired == []
+    # once the recording is over, Esc belongs to the window's own shortcut again
+    QTest.keyClick(edit, Qt.Key.Key_Escape)
+    assert other_fired == [True]
+
+
+def test_esc_disposed_on_transcribing(rig):
+    rig.widgets[0].button.click()
+    assert rig.ctl._esc_filter is not None
+    rig.widgets[0].button.click()
+    assert rig.ctl.state == "transcribing"
+    assert rig.ctl._esc_filter is None
+
+
+def test_recorder_factory_raising_releases_hold(rig):
+    def boom(device_id=""):
+        raise RuntimeError("no audio backend")
+
+    rig.ctl._recorder_factory = boom
+    rig.widgets[0].button.click()
+    assert rig.voice.held == 0
+    assert rig.ctl.state == "idle"
+    assert rig.client.calls[-1] == ("utterance.cancel", {"stream_id": "s1"})
+    assert rig.widgets[0].flashed()[-1] == "Voice input failed: no audio backend"
+    rig.ctl._recorder_factory = rig._make_recorder
+    rig.widgets[0].button.click()
+    assert rig.ctl.state == "listening"
+
+
+def test_listening_watchdog_cancels(rig):
+    w = rig.widgets[0]
+    w.button.click()
+    assert rig.ctl._watchdog.isActive()
+    assert rig.ctl._watchdog.interval() == 70_000
+    rig.ctl._watchdog.timeout.emit()
+    assert rig.ctl.state == "idle"
+    assert w.flashed()[-1] == "Speech service did not respond"
+    assert rig.client.calls[-1] == ("utterance.cancel", {"stream_id": "s1"})
+    assert rig.voice.held == 0
+
+
+def test_transcribing_watchdog_interval(rig):
+    rig.widgets[0].button.click()
+    rig.widgets[0].button.click()
+    assert rig.ctl._watchdog.interval() == 120_000
+    rig.ctl._watchdog.timeout.emit()
+    assert rig.ctl.state == "idle"

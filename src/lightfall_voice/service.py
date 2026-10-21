@@ -41,7 +41,7 @@ def set_service(service: "VoiceService | None") -> None:
     _service = service
 
 
-def _default_widget_scanner() -> list:
+def default_widget_scanner() -> list:
     from PySide6.QtWidgets import QApplication
 
     from lightfall.claude.widget import ClaudeAssistantWidget
@@ -65,7 +65,7 @@ class VoiceService(QObject):
         self._client = client or DaemonClient(
             host=settings.daemon_host, port=settings.daemon_port
         )
-        self._scan = widget_scanner or _default_widget_scanner
+        self._scan = widget_scanner or default_widget_scanner
         self._clock = clock
         # Track attached agents by id() so rescans are idempotent. Keep a
         # real reference too: Qt disconnects automatically on destruction.
