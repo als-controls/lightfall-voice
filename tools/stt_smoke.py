@@ -86,29 +86,20 @@ async def run(url: str, token: str, audio: np.ndarray, args: argparse.Namespace)
     try:
         await client.start()
         await _until(lambda: client.health == "up", 30, "service session")
-        # The service starts loading its default config (small/auto) at once; let that
-        # finish so the load timed below is only the requested one.
-        t_boot = time.perf_counter()
-        await _until(
-            lambda: _summary(client).get("status") in ("ready", "error"),
-            args.load_timeout,
-            "initial model load",
-        )
+        # Like Lightfall's controller, send config.set right away: the service defers its
+        # first load for a moment so this config is the only one loaded.
         boot = _summary(client)
-        print(
-            f"initial load:   {boot.get('status')} {boot.get('model')}/{boot.get('device')!r}"
-            f" in {time.perf_counter() - t_boot:.2f} s {boot.get('error') or ''}"
-        )
+        print(f"before config:  status={boot.get('status')!r} (expected 'loading')")
 
         t0 = time.perf_counter()
-        cfg = await client.call(
-            "config.set", {"model": args.model, "device": args.device, "language": "en"}
-        )
+        conf = {"model": args.model, "device": args.device, "language": "en"}
+        if args.model_dir:
+            conf["model_dir"] = args.model_dir
+        cfg = await client.call("config.set", conf)
         if cfg.get("status") != "ok":
             print(f"config.set failed: {cfg}", file=sys.stderr)
             return 1
-        # config.set drops the current model before reloading, so utterance.start fails
-        # with "model not ready" until the requested model is loaded.
+        # utterance.start fails with "model not ready" until the requested model is loaded.
         sid = None
         end = time.monotonic() + args.load_timeout
         while sid is None:
@@ -186,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("wav", help="PCM WAV file to transcribe")
     p.add_argument("--device", choices=("auto", "gpu", "cpu"), default="auto")
     p.add_argument("--model", default="small")
+    p.add_argument("--model-dir", default="",
+                   help="model cache directory (default: the faster-whisper default)")
     p.add_argument("--load-timeout", type=float, default=900.0,
                    help="seconds to wait for the model (the first run downloads it)")
     p.add_argument("--realtime", action="store_true",

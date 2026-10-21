@@ -123,6 +123,7 @@ class Rig:
 async def _rig(broker_url, factory=None, *, session_token=None, **kw):
     kw.setdefault("heartbeat_s", 0.1)
     kw.setdefault("single_instance", False)
+    kw.setdefault("initial_load_delay_s", 0.0)
     host = make_host(SCOPE, transcriber_factory=factory, **kw)
     svc = NatsCore(broker_url)
     await svc.connect()
@@ -570,7 +571,8 @@ def test_summary_status_transitions(broker_url):
 def test_missing_faster_whisper_reports_install_hint(broker_url, monkeypatch):
     from lightfall_voice.stt_service import transcriber as tr
 
-    monkeypatch.delenv("LIGHTFALL_STT_FAKE", raising=False)
+    # The old test-only env var is ignored: production never swaps in a fake.
+    monkeypatch.setenv("LIGHTFALL_STT_FAKE", "should be ignored")
     monkeypatch.setitem(sys.modules, "faster_whisper", None)
     monkeypatch.setattr(tr, "add_nvidia_dll_dirs", lambda: [])
 
@@ -593,10 +595,10 @@ def test_missing_faster_whisper_reports_install_hint(broker_url, monkeypatch):
     assert start["code"] == "unknown"
 
 
-def test_subprocess_with_fake_env(broker_url):
-    """``LIGHTFALL_STT_FAKE`` (test-only) makes ``python -m lightfall_voice.stt_service`` use
-    a fake transcriber."""
-    env = {**os.environ, "LIGHTFALL_STT_FAKE": "from the subprocess"}
+def test_subprocess_with_fake_transcriber_flag(broker_url):
+    """The hidden ``--fake-transcriber`` (test-only) makes ``python -m
+    lightfall_voice.stt_service`` use a fake transcriber."""
+    env = {k: v for k, v in os.environ.items() if k != "LIGHTFALL_STT_FAKE"}
     scope = "lfsttproc"
     proc = subprocess.Popen(
         [
@@ -608,6 +610,8 @@ def test_subprocess_with_fake_env(broker_url):
             "--nats-url",
             broker_url,
             "--token-stdin",
+            "--fake-transcriber",
+            "from the subprocess",
         ],
         stdin=subprocess.PIPE,
         env=env,
@@ -668,3 +672,125 @@ def test_service_imports_without_faster_whisper(mod):
         f"import {mod}"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_initial_load_waits_for_config_set(broker_url):
+    """A config.set inside the initial window gives exactly one load, with that config."""
+    fac = Factory()
+
+    async def go():
+        r = await _rig(broker_url, fac, initial_load_delay_s=2.0)
+        try:
+            await _until(lambda: r.client.health == "up")
+            before = (len(fac.calls), dict(r.host.summary))
+            reply = await r.client.call(
+                "config.set", {"model": "base", "model_dir": "D:/models", "device": "cpu"}
+            )
+            await r.ready()
+            await asyncio.sleep(2.5)  # past the original window: no second load
+            return before, reply
+        finally:
+            await r.close()
+
+    (n_before, summ_before), reply = _run(go())
+    assert n_before == 0
+    assert summ_before["status"] == "loading"
+    assert reply["status"] == "ok"
+    assert reply["reloading"] is True
+    assert len(fac.calls) == 1
+    assert fac.calls[0]["model"] == "base"
+    assert fac.calls[0]["model_dir"] == "D:/models"
+    assert fac.calls[0]["device"] == "cpu"
+
+
+def test_initial_load_without_config_set_uses_defaults(broker_url):
+    fac = Factory()
+
+    async def go():
+        r = await _rig(broker_url, fac, initial_load_delay_s=0.3)
+        try:
+            await r.ready()
+            await asyncio.sleep(0.3)
+        finally:
+            await r.close()
+
+    _run(go())
+    assert len(fac.calls) == 1
+    assert fac.calls[0]["model"] == "small"
+    assert fac.calls[0]["device"] == "auto"
+
+
+class _Blocking(Factory):
+    """Transcribers that block in transcribe() until ``release`` is set."""
+
+    def __init__(self, text="late"):
+        super().__init__(text)
+        self.release = threading.Event()
+        self.entered = threading.Event()
+
+    def __call__(self, **cfg):
+        t = super().__call__(**cfg)
+        orig = t.transcribe
+
+        def slow(audio, language):
+            self.entered.set()
+            self.release.wait(10)
+            return orig(audio, language)
+
+        t.transcribe = slow
+        return t
+
+
+def test_cancel_while_transcribing_frees_slot_and_drops_transcript(broker_url):
+    fac = _Blocking("late")
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            sid = await r.start()
+            await r.send(sid, _tone(1.0))
+            await r.client.call("utterance.stop", {"stream_id": sid})
+            await _until(fac.entered.is_set)
+            cancel = await r.client.call("utterance.cancel", {"stream_id": sid})
+            again = await r.client.call("utterance.start", START)
+            fac.release.set()
+            await asyncio.sleep(0.5)
+            return r, sid, cancel, again
+        finally:
+            fac.release.set()
+            await r.close()
+
+    r, sid, cancel, again = _run(go())
+    assert cancel["status"] == "ok"
+    assert again["status"] == "ok", again  # not busy
+    assert "transcript" not in r.names(sid)
+    assert r.get("transcript") == []
+
+
+def test_idle_stream_emits_idle_error(broker_url, monkeypatch):
+    from lightfall_utils.ipc.services import protocol
+
+    monkeypatch.setattr(protocol, "STREAM_IDLE_S", 0.5)
+
+    async def go():
+        r = await _rig(broker_url, Factory())
+        try:
+            await r.ready()
+            sid = await r.start()
+            await r.send(sid, _tone(0.3))
+            await _until(lambda: "error" in r.names(), 5)
+            again = await r.client.call("utterance.start", START)
+            return r, sid, again
+        finally:
+            await r.close()
+
+    r, sid, again = _run(go())
+    (err,) = r.get("error")
+    assert err == {
+        **err,
+        "stream_id": sid,
+        "code": "idle",
+        "message": "Microphone stopped sending audio",
+    }
+    assert again["status"] == "ok"

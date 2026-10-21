@@ -19,10 +19,16 @@ Run it with ``python -m lightfall_voice.stt_service --scope S --nats-url URL --t
 - Heartbeat summary ``{model, device, status: loading|downloading|ready|error, error}``.
   The host state stays ``starting`` until the first model load ends (``ready`` or
   ``error``).
+- The first load waits up to ``initial_load_delay_s`` (2 s) for the client's ``config.set``,
+  so the model is loaded once, with the client's model / ``model_dir`` / device; without a
+  ``config.set`` in that window the defaults are loaded.  The summary says ``loading``
+  meanwhile.
+- ``utterance.cancel`` while transcribing frees the slot at once; the late transcript is
+  dropped.  A stream the host drops for idleness gets ``utterance.error`` code ``idle``.
 
-Test-only: the environment variable ``LIGHTFALL_STT_FAKE="<text>"`` replaces the real
-transcriber with a fake one that returns ``<text>`` for every utterance (used by the
-subprocess tests; never set it in production).
+Test-only: the hidden ``--fake-transcriber TEXT`` option of ``python -m
+lightfall_voice.stt_service`` (or ``make_host(transcriber_factory=fake_factory(TEXT))``)
+replaces the real transcriber with one returning ``TEXT`` for every utterance.
 """
 
 from __future__ import annotations
@@ -30,9 +36,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import os
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,7 +53,6 @@ log = logging.getLogger(__name__)
 NAME = "stt"
 CONTRACT = "1.0"
 INSTALL_HINT = "Install lightfall-voice[stt-service]"
-FAKE_ENV = "LIGHTFALL_STT_FAKE"
 KIND = "audio"
 DEFAULT_CONFIG: dict[str, Any] = {
     "model": "small",
@@ -90,7 +95,7 @@ def default_factory(
 
 
 class FakeTranscriber:
-    """Test-only transcriber returning fixed text (see ``LIGHTFALL_STT_FAKE``)."""
+    """Test-only transcriber returning fixed text (see ``--fake-transcriber``)."""
 
     device = "cpu"
 
@@ -116,6 +121,7 @@ class _Utterance:
     detector: EndpointDetector
     transcriber: Any  # the model current at utterance.start (survives a reload)
     listening: bool = False
+    discarded: bool = False  # cancelled while ending/transcribing: drop the result
     reason: str | None = None  # set once the utterance is ending
     detector_done: bool = False  # the detector ended it: later chunks are not fed
 
@@ -131,20 +137,23 @@ class SttHost(ServiceHost):
             self.on_started(asyncio.get_running_loop())
 
 
+INITIAL_LOAD_DELAY_S = 2.0
+
+
 def make_host(
-    scope: str = "", *, transcriber_factory: TranscriberFactory | None = None, **kw: Any
+    scope: str = "",
+    *,
+    transcriber_factory: TranscriberFactory | None = None,
+    initial_load_delay_s: float = INITIAL_LOAD_DELAY_S,
+    **kw: Any,
 ) -> ServiceHost:
     """Build the stt :class:`ServiceHost` (not started); ``kw`` go to ``ServiceHost``.
 
     ``transcriber_factory(model=, device=, model_dir=, language=, progress=)`` returns a
     loaded :class:`Transcriber` (it runs on a background thread and may block).
+    ``initial_load_delay_s`` is how long the first load waits for a ``config.set``.
     """
-    if transcriber_factory is None:
-        fake = os.environ.get(FAKE_ENV)
-        transcriber_factory = (
-            fake_factory(fake) if fake is not None else default_factory
-        )
-    factory = transcriber_factory
+    factory = transcriber_factory or default_factory
     kw.setdefault("contract", CONTRACT)
     kw.setdefault("version", _version())
     kw["auto_ready"] = False
@@ -157,7 +166,12 @@ def make_host(
         "gen": 0,  # bumped per requested load; stale loads are discarded
         "transcriber": None,
         "active": None,  # stream id of the active utterance
+        "initial": None,  # TimerHandle of the deferred first load, while pending
+        "configured": False,  # a config.set arrived
     }
+    # One worker: a transcription abandoned by utterance.cancel finishes before the next
+    # one starts, so the model is never run twice at once.
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt-transcribe")
     utterances: dict[str, _Utterance] = {}
 
     def summary(status: str, device: str = "", error: str = "") -> dict:
@@ -234,9 +248,16 @@ def make_host(
             target=load, args=(st["gen"], dict(cfg)), name="stt-model-load", daemon=True
         ).start()
 
+    def initial_load() -> None:
+        st["initial"] = None
+        start_load()
+
     def on_started(loop: asyncio.AbstractEventLoop) -> None:
         st["loop"] = loop
-        start_load()
+        if st["configured"]:
+            start_load()  # the client's config.set beat us here
+        else:
+            st["initial"] = loop.call_later(max(0.0, initial_load_delay_s), initial_load)
 
     host.on_started = on_started
 
@@ -279,8 +300,19 @@ def make_host(
         cfg.update(new)
         for u in utterances.values():
             u.detector.silence_s = cfg["silence_s"]
-        if reload and st["loop"] is not None:
+        first = not st["configured"]
+        st["configured"] = True
+        pending = st["initial"]
+        if pending is not None:
+            # The deferred first load: load now, once, with the client's config.
+            pending.cancel()
+            st["initial"] = None
+            reload = True
             start_load()
+        elif reload and st["loop"] is not None:
+            start_load()
+        elif first and st["loop"] is None:
+            reload = True  # on_started will load this config
         return {**cfg, "reloading": reload}
 
     # -- utterances ----------------------------------------------------------------------
@@ -335,7 +367,12 @@ def make_host(
     async def utterance_cancel(session: Session, payload: dict) -> dict:
         u = own(session, payload)
         if u.reason is not None:
-            return {}  # already ending: its ended event is on its way
+            # Already ending (stop / silence / max), maybe transcribing: the transcriber
+            # thread cannot be interrupted, so free the slot now and drop the result when
+            # it arrives (the single worker keeps the model serialized).
+            u.discarded = True
+            finish(u.stream_id)
+            return {}
         u.reason = "cancel"
         finish(u.stream_id)
         await host.end_stream(u.stream_id)
@@ -386,14 +423,18 @@ def make_host(
                     {"stream_id": sid, "code": "unknown", "message": "model not ready"},
                 )
                 return
+            if u.discarded:
+                return
             audio = u.detector.audio()
             loop = asyncio.get_running_loop()
             try:
                 raw = await loop.run_in_executor(
-                    None, transcriber.transcribe, audio, cfg["language"] or None
+                    executor, transcriber.transcribe, audio, cfg["language"] or None
                 )
                 text = filters.clean(raw or "")
             except Exception as e:
+                if u.discarded:
+                    return
                 log.exception("transcription failed")
                 await host.emit(
                     session,
@@ -405,18 +446,36 @@ def make_host(
                     },
                 )
                 return
+            if u.discarded:
+                log.info("utterance %s… cancelled while transcribing; dropped", sid[:6])
+                return
             await host.emit(
                 session, "utterance.transcript", {"stream_id": sid, "text": text}
             )
         finally:
             finish(sid)
 
-    def on_stream_end(session: Session, sid: str, reason: str) -> None:
+    async def on_stream_end(session: Session, sid: str, reason: str) -> None:
         # final/close went through finalize(); cancel through utterance.cancel.  Anything
-        # else (idle, session_end, stop) just frees the slot.
-        if sid in utterances:
-            log.info("utterance %s… dropped (%s)", sid[:6], reason)
-            finish(sid)
+        # else (idle, session_end, stop) frees the slot; an idle drop also tells the
+        # client, so it leaves "listening" at once instead of waiting for its watchdog.
+        if sid not in utterances:
+            return
+        log.info("utterance %s… dropped (%s)", sid[:6], reason)
+        finish(sid)
+        if reason == "idle":
+            try:
+                await host.emit(
+                    session,
+                    "utterance.error",
+                    {
+                        "stream_id": sid,
+                        "code": "idle",
+                        "message": "Microphone stopped sending audio",
+                    },
+                )
+            except Exception:
+                log.exception("could not report the idle stream")
 
     host.on_stream_end(on_stream_end)
     return host
