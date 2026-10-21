@@ -31,7 +31,8 @@ def test_error_event_is_high_priority():
 
 
 def test_events_are_frozen():
-    import dataclasses, pytest
+    import dataclasses
+    import pytest
     e = summary_event("a", "b", now=0.0)
     with pytest.raises(dataclasses.FrozenInstanceError):
         e.text = "mutated"
