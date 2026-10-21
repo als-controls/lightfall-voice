@@ -21,5 +21,10 @@ manifest = PluginManifest(
             import_path="lightfall_voice.settings:VoiceSettingsPlugin",
             preload=True,
         ),
+        PluginEntry(
+            type_name="service",
+            name="stt",
+            import_path="lightfall_voice.stt_plugin:SttServicePlugin",
+        ),
     ],
 )

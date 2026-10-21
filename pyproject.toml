@@ -8,10 +8,12 @@ description = "Voice notifications plugin for Lightfall via the local Kokoro voi
 readme = "README.md"
 requires-python = ">=3.11"
 dynamic = ["version"]
-dependencies = ["lightfall"]
+dependencies = ["lightfall", "numpy"]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-qt"]
+stt-service = ["faster-whisper>=1.1", "numpy"]
+gpu = ["lightfall-voice[stt-service]", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"]
 
 [project.entry-points."lightfall.plugins"]
 lightfall_voice = "lightfall_voice.manifest:manifest"
