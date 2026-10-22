@@ -23,7 +23,7 @@ _KEYS = {
 
 @dataclass(frozen=True)
 class AgentOverride:
-    muted: bool = True
+    muted: bool = False
     voice: str | None = None
 
 
@@ -43,7 +43,7 @@ class VoiceSettings:
         raw_overrides = prefs.get(_KEYS["agent_overrides"], {}) or {}
         overrides = {
             name: AgentOverride(
-                muted=bool(o.get("muted", True)), voice=o.get("voice") or None
+                muted=bool(o.get("muted", False)), voice=o.get("voice") or None
             )
             for name, o in raw_overrides.items()
         }
@@ -75,18 +75,19 @@ class VoiceSettings:
         )
 
 
-PRIMARY_AGENT = "lightfall"
+def muted_by_default(agent_name: str) -> bool:
+    """Mute state of an agent with no override in voice.agent_overrides.
 
-
-def muted_by_default(agent_name: str, primary_agent: str = PRIMARY_AGENT) -> bool:
-    """Mute state of an agent with no override in voice.agent_overrides."""
-    return agent_name != primary_agent
+    Every session tab speaks unless muted: agent_overrides is a pure opt-out.
+    (Subagents never reach the policy: they have no widget, and their tool
+    calls arrive through the parent session's signals under its name.)
+    """
+    return False
 
 
 class VoicePolicy:
-    def __init__(self, settings: VoiceSettings, primary_agent: str = PRIMARY_AGENT) -> None:
+    def __init__(self, settings: VoiceSettings) -> None:
         self.settings = settings
-        self.primary_agent = primary_agent
         self._last_tool_time: dict[tuple[str, str], float] = {}
 
     def decide(self, event: VoiceEvent, now: float) -> tuple[str, str | None] | None:
@@ -109,7 +110,7 @@ class VoicePolicy:
         if event.priority != "high":
             muted = (
                 override.muted if override is not None
-                else muted_by_default(event.agent_name, self.primary_agent)
+                else muted_by_default(event.agent_name)
             )
             if muted:
                 return None

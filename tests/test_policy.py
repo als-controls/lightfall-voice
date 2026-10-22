@@ -29,10 +29,24 @@ def test_event_kind_toggles():
     assert p.decide(summary_event("lightfall", "Task complete", 0.0), now=0.0) is not None
 
 
-def test_subagent_low_priority_muted_by_default():
+def test_non_primary_session_speaks_by_default():
     p = make_policy()
-    assert p.decide(tool_event("alignment", "Read", "Reading x", 0.0), now=0.0) is None
-    assert p.decide(summary_event("alignment", "Done", 0.0), now=0.0) is None
+    assert p.decide(tool_event("observer", "Read", "Reading x", 0.0), now=0.0) == (
+        "Reading x", None,
+    )
+    assert p.decide(summary_event("observer", "Done", 0.0), now=0.0) == ("Done", None)
+
+
+def test_muted_override_silences_low_priority():
+    p = make_policy(agent_overrides={"observer": AgentOverride(muted=True)})
+    assert p.decide(tool_event("observer", "Read", "Reading x", 0.0), now=0.0) is None
+    assert p.decide(summary_event("observer", "Done", 0.0), now=0.0) is None
+    assert p.decide(tool_event("lightfall", "Read", "Reading x", 0.0), now=0.0) is not None
+
+
+def test_voice_only_override_is_not_a_mute():
+    p = make_policy(agent_overrides={"observer": AgentOverride(voice="af_sky")})
+    assert p.decide(summary_event("observer", "Done", 0.0), now=0.0) == ("Done", "af_sky")
 
 
 def test_subagent_high_priority_speaks_by_default():

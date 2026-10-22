@@ -9,13 +9,16 @@ the local Kokoro voice daemon from `~/.claude/hooks/voice_notifications`
 - **Permission requests** — "Permission needed to run a command" (high
   priority, non-interruptible)
 - **Turn summaries** — trimmed final assistant text, or "Task complete"
-- **Tool announcements** — "Reading loader", "Running a command"
-  (rate-limited to one per tool per 3 s)
+- **Tool announcements** — "Reading loader", "Running a command"; MCP tools
+  from their name ("Reading device" for `lightfall_read_device`). TodoWrite,
+  Task, Agent and ToolSearch stay silent. Rate-limited to one per tool per 3 s
 - **Errors** — "Agent error. Attention needed"
 
-Subagent sessions are muted by default; their permission requests and errors
-still speak, prefixed with the agent name. Low-priority events older than
-10 s are dropped, never spoken late.
+Every session tab speaks by default. Mute one under **Preferences → Voice
+Notifications → Agents**; a muted agent's permission requests and errors
+still speak. Agents other than the main `lightfall` assistant are named in
+those phrases. Low-priority events older than 10 s are dropped, never
+spoken late.
 
 ## Install
 
@@ -70,8 +73,8 @@ While you dictate, spoken notifications are held and released afterwards.
 
 `voice.enabled`, `voice.events.{tools,summary,permission,errors}`,
 `voice.daemon_host`, `voice.daemon_port`, `voice.input.*` (above), `voice.agent_overrides`
-(`{agent_name: {"muted": bool, "voice": "af_sky"}}` — no UI yet, edit via
-preferences).
+(`{agent_name: {"muted": bool, "voice": "af_sky"}}`; the Agents list sets
+`muted`, per-agent voices are preferences-only).
 
 ## Tests
 

@@ -132,9 +132,18 @@ def test_error_speaks_attention_phrase(qtbot):
     )
 
 
-def test_subagent_session_is_muted_for_low_priority(qtbot):
-    w = StubWidget(agent_name="alignment")
+def test_new_session_tab_speaks_without_configuration(qtbot):
+    w = StubWidget(agent_name="observer")
     service, client, _ = make_service(qtbot, [w])
+    w.agent.tool_called.emit("Read", {"file_path": "C:/x/a.py"})
+    w.agent.result_received.emit({"session_id": "s1", "text": "done"})
+    assert [c.args[0] for c in client.speak.call_args_list] == ["Reading a", "done"]
+
+
+def test_muted_session_is_silent_for_low_priority(qtbot):
+    w = StubWidget(agent_name="alignment")
+    settings = VoiceSettings(agent_overrides={"alignment": AgentOverride(muted=True)})
+    service, client, _ = make_service(qtbot, [w], settings=settings)
     w.agent.tool_called.emit("Read", {"file_path": "C:/x/a.py"})
     w.agent.message_received.emit("done")
     w.agent.result_received.emit({"session_id": "s1"})
@@ -225,13 +234,13 @@ def test_handler_exceptions_do_not_propagate(qtbot):
 
 def test_bus_endpoint_name_resolves_agent_name(qtbot):
     """Real widgets have no .spec; the agent name must come from
-    bus_endpoint.name so subagent muting/prefixing works in production."""
+    bus_endpoint.name so per-agent muting/prefixing works in production."""
     w = BusEndpointStubWidget(agent_name="alignment")
     service, client, _ = make_service(qtbot, [w])
 
-    # Low-priority events from a subagent are muted by default.
     w.agent.tool_called.emit("Read", {"file_path": "C:/x/a.py"})
-    client.speak.assert_not_called()
+    client.speak.assert_called_once_with("Reading a", voice=None, ttl=10.0)
+    client.speak.reset_mock()
 
     # High-priority events are name-prefixed using the resolved name.
     w.agent.error_occurred.emit("boom")

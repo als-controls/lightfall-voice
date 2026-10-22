@@ -25,7 +25,11 @@ from lightfall_voice.events import (
     summary_event,
     tool_event,
 )
-from lightfall_voice.policy import PRIMARY_AGENT, VoicePolicy, VoiceSettings
+from lightfall_voice.policy import VoicePolicy, VoiceSettings
+
+# Name for a session whose widget carries none. Spoken phrases omit it, so
+# the main assistant's errors and permission requests aren't name-prefixed.
+PRIMARY_AGENT = "lightfall"
 
 _service: "VoiceService | None" = None
 
@@ -59,7 +63,7 @@ class VoiceService(QObject):
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__()
-        self._policy = VoicePolicy(settings, primary_agent=PRIMARY_AGENT)
+        self._policy = VoicePolicy(settings)
         self._client = client or DaemonClient(
             host=settings.daemon_host, port=settings.daemon_port
         )
@@ -142,7 +146,7 @@ class VoiceService(QObject):
 
     def apply_settings(self, settings: VoiceSettings) -> None:
         old_last_tool_time = self._policy._last_tool_time
-        self._policy = VoicePolicy(settings, primary_agent=PRIMARY_AGENT)
+        self._policy = VoicePolicy(settings)
         self._policy._last_tool_time = old_last_tool_time
         self._client.configure(settings.daemon_host, settings.daemon_port)
 
