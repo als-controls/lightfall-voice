@@ -52,7 +52,7 @@ def test_tool_call_speaks_phrase(qtbot):
     w = StubWidget()
     service, client, _ = make_service(qtbot, [w])
     w.agent.tool_called.emit("Read", {"file_path": "C:/x/loader.py"})
-    client.speak.assert_called_once_with("Reading loader", voice=None, ttl=10.0)
+    client.speak.assert_called_once_with("Reading loader", voice="af_heart", ttl=10.0)
 
 
 def test_permission_request_speaks_high_priority_phrase(qtbot):
@@ -60,7 +60,7 @@ def test_permission_request_speaks_high_priority_phrase(qtbot):
     service, client, _ = make_service(qtbot, [w])
     w.agent.permission_requested.emit("req1", "Bash", {})
     client.speak.assert_called_once_with(
-        "Permission needed to run a command", voice=None, ttl=None
+        "Permission needed to run a command", voice="af_heart", ttl=None
     )
 
 
@@ -69,7 +69,7 @@ def test_result_speaks_buffered_message(qtbot):
     service, client, _ = make_service(qtbot, [w])
     w.agent.message_received.emit("Fixed the flaky test.")
     w.agent.result_received.emit({"total_cost_usd": 0.01, "session_id": "s1"})
-    client.speak.assert_called_once_with("Fixed the flaky test.", voice=None, ttl=10.0)
+    client.speak.assert_called_once_with("Fixed the flaky test.", voice="af_heart", ttl=10.0)
 
 
 def test_result_speaks_its_own_text_without_message_received(qtbot):
@@ -77,7 +77,7 @@ def test_result_speaks_its_own_text_without_message_received(qtbot):
     w = StubWidget()
     service, client, _ = make_service(qtbot, [w])
     w.agent.result_received.emit({"session_id": "s1", "text": "Pong, still here."})
-    client.speak.assert_called_once_with("Pong, still here.", voice=None, ttl=10.0)
+    client.speak.assert_called_once_with("Pong, still here.", voice="af_heart", ttl=10.0)
 
 
 def test_result_text_wins_over_buffered_message(qtbot):
@@ -85,7 +85,7 @@ def test_result_text_wins_over_buffered_message(qtbot):
     service, client, _ = make_service(qtbot, [w])
     w.agent.message_received.emit("Let me check.")
     w.agent.result_received.emit({"text": "All done."})
-    client.speak.assert_called_once_with("All done.", voice=None, ttl=10.0)
+    client.speak.assert_called_once_with("All done.", voice="af_heart", ttl=10.0)
     client.speak.reset_mock()
     w.agent.result_received.emit({"text": ""})  # buffer was consumed too
     client.speak.assert_not_called()
@@ -95,7 +95,7 @@ def test_mcp_tool_call_is_announced(qtbot):
     w = StubWidget()
     service, client, _ = make_service(qtbot, [w])
     w.agent.tool_called.emit("mcp__lightfall__lightfall_read_device", {})
-    client.speak.assert_called_once_with("Reading device", voice=None, ttl=10.0)
+    client.speak.assert_called_once_with("Reading device", voice="af_heart", ttl=10.0)
 
 
 def test_attached_agent_names(qtbot):
@@ -116,7 +116,7 @@ def test_result_buffer_clears_after_speaking(qtbot):
     service, client, _ = make_service(qtbot, [w])
     w.agent.message_received.emit("First answer.")
     w.agent.result_received.emit({"session_id": "s1"})
-    client.speak.assert_called_once_with("First answer.", voice=None, ttl=10.0)
+    client.speak.assert_called_once_with("First answer.", voice="af_heart", ttl=10.0)
     client.speak.reset_mock()
     # Second result with no new message in between must stay silent.
     w.agent.result_received.emit({"session_id": "s1"})
@@ -128,7 +128,7 @@ def test_error_speaks_attention_phrase(qtbot):
     service, client, _ = make_service(qtbot, [w])
     w.agent.error_occurred.emit("boom")
     client.speak.assert_called_once_with(
-        "Agent error. Attention needed", voice=None, ttl=None
+        "Agent error. Attention needed", voice="af_heart", ttl=None
     )
 
 
@@ -155,7 +155,7 @@ def test_subagent_error_is_name_prefixed(qtbot):
     service, client, _ = make_service(qtbot, [w])
     w.agent.error_occurred.emit("boom")
     client.speak.assert_called_once_with(
-        "Agent alignment error. Attention needed", voice=None, ttl=None
+        "Agent alignment error. Attention needed", voice="af_heart", ttl=None
     )
 
 
@@ -164,7 +164,7 @@ def test_subagent_permission_is_name_prefixed(qtbot):
     service, client, _ = make_service(qtbot, [w])
     w.agent.permission_requested.emit("req1", "Edit", {})
     client.speak.assert_called_once_with(
-        "Agent alignment: permission needed to edit a file", voice=None, ttl=None
+        "Agent alignment: permission needed to edit a file", voice="af_heart", ttl=None
     )
 
 
@@ -214,7 +214,7 @@ def test_apply_settings_preserves_tool_rate_limit_state(qtbot):
 def test_speak_test_forwards_to_client(qtbot):
     service, client, _ = make_service(qtbot, [])
     service.speak_test()
-    client.speak.assert_called_once_with("Voice notifications are working")
+    client.speak.assert_called_once_with("Voice notifications are working", voice="af_heart")
 
 
 def test_silent_tools_do_not_speak(qtbot):
@@ -239,11 +239,11 @@ def test_bus_endpoint_name_resolves_agent_name(qtbot):
     service, client, _ = make_service(qtbot, [w])
 
     w.agent.tool_called.emit("Read", {"file_path": "C:/x/a.py"})
-    client.speak.assert_called_once_with("Reading a", voice=None, ttl=10.0)
+    client.speak.assert_called_once_with("Reading a", voice="af_heart", ttl=10.0)
     client.speak.reset_mock()
 
     # High-priority events are name-prefixed using the resolved name.
     w.agent.error_occurred.emit("boom")
     client.speak.assert_called_once_with(
-        "Agent alignment error. Attention needed", voice=None, ttl=None
+        "Agent alignment error. Attention needed", voice="af_heart", ttl=None
     )

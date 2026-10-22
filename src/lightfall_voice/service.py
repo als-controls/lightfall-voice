@@ -189,8 +189,8 @@ class VoiceService(QObject):
         return sorted(set(self._attached_names.values()))
 
     def speak_test(self, message: str = "Voice notifications are working") -> None:
-        """Speak a test message directly, bypassing policy."""
-        self._client.speak(message)
+        """Speak a test message directly, bypassing policy, in the default voice."""
+        self._client.speak(message, voice=self.settings.default_voice or None)
 
     # -- discovery ---------------------------------------------------------
 

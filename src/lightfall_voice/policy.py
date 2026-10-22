@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from lightfall_voice.events import VoiceEvent
+from lightfall_voice.voices import DEFAULT_VOICE
 
 TTL_SECONDS = 10.0
 TOOL_RATE_LIMIT_SECONDS = 3.0
@@ -17,6 +18,7 @@ _KEYS = {
     "errors": "voice.events.errors",
     "daemon_host": "voice.daemon_host",
     "daemon_port": "voice.daemon_port",
+    "default_voice": "voice.default_voice",
     "agent_overrides": "voice.agent_overrides",
 }
 
@@ -36,6 +38,8 @@ class VoiceSettings:
     errors: bool = True
     daemon_host: str = "127.0.0.1"
     daemon_port: int = 52849
+    # Voice for agents without their own; "" leaves it to the daemon's config.
+    default_voice: str = DEFAULT_VOICE
     agent_overrides: dict[str, AgentOverride] = field(default_factory=dict)
 
     @classmethod
@@ -55,6 +59,7 @@ class VoiceSettings:
             errors=bool(prefs.get(_KEYS["errors"], True)),
             daemon_host=str(prefs.get(_KEYS["daemon_host"], "127.0.0.1")),
             daemon_port=int(prefs.get(_KEYS["daemon_port"], 52849)),
+            default_voice=str(prefs.get(_KEYS["default_voice"], DEFAULT_VOICE) or ""),
             agent_overrides=overrides,
         )
 
@@ -66,6 +71,7 @@ class VoiceSettings:
         prefs.set(_KEYS["errors"], self.errors)
         prefs.set(_KEYS["daemon_host"], self.daemon_host)
         prefs.set(_KEYS["daemon_port"], self.daemon_port)
+        prefs.set(_KEYS["default_voice"], self.default_voice)
         prefs.set(
             _KEYS["agent_overrides"],
             {
@@ -83,6 +89,21 @@ def muted_by_default(agent_name: str) -> bool:
     calls arrive through the parent session's signals under its name.)
     """
     return False
+
+
+def with_agent_voice(
+    overrides: dict[str, AgentOverride], agent_name: str, voice: str | None
+) -> dict[str, AgentOverride]:
+    """``overrides`` with ``agent_name``'s voice set (None/"" = the default
+    voice); its mute is kept. Entries restating the default are dropped."""
+    out = dict(overrides)
+    muted = out[agent_name].muted if agent_name in out else muted_by_default(agent_name)
+    voice = voice or None
+    if muted == muted_by_default(agent_name) and voice is None:
+        out.pop(agent_name, None)
+    else:
+        out[agent_name] = AgentOverride(muted=muted, voice=voice)
+    return out
 
 
 def with_agent_muted(
@@ -140,5 +161,5 @@ class VoicePolicy:
                     return None
                 self._last_tool_time[key] = now
 
-        voice = override.voice if override is not None else None
-        return (event.text, voice)
+        voice = (override.voice if override is not None else None) or s.default_voice
+        return (event.text, voice or None)

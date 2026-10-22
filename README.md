@@ -17,7 +17,15 @@ the local Kokoro voice daemon from `~/.claude/hooks/voice_notifications`
 Every session tab speaks by default. Mute the visible tab with the speaker
 button in the Assistant panel's title bar, or any agent under **Preferences →
 Voice Notifications → Agents**; a muted agent's permission requests and
-errors still speak. Agents other than the main `lightfall` assistant are named in
+errors still speak.
+
+Voices: **Preferences → Voice Notifications → Voices → Default voice** sets
+the voice for every agent (default `af_heart`, the voice ascribe-link uses);
+the Agents list picks a voice per agent. Both combos are editable, so any
+Kokoro voice id can be typed. An empty default leaves the choice to the
+daemon's `config.json` (`kokoro_voice`).
+
+Agents other than the main `lightfall` assistant are named in
 those phrases. Low-priority events older than 10 s are dropped, never
 spoken late.
 
@@ -73,9 +81,9 @@ While you dictate, spoken notifications are held and released afterwards.
 ## Settings keys
 
 `voice.enabled`, `voice.events.{tools,summary,permission,errors}`,
-`voice.daemon_host`, `voice.daemon_port`, `voice.input.*` (above), `voice.agent_overrides`
-(`{agent_name: {"muted": bool, "voice": "af_sky"}}`; the Agents list sets
-`muted`, per-agent voices are preferences-only).
+`voice.daemon_host`, `voice.daemon_port`, `voice.default_voice`, `voice.input.*`
+(above), `voice.agent_overrides` (`{agent_name: {"muted": bool, "voice": "af_sky"}}`,
+set from the Agents list).
 
 ## Tests
 

@@ -85,8 +85,11 @@ def test_test_button_speaks(qtbot):
 
 
 def _agent_items(p):
-    return {p._agents_list.item(i).text(): p._agents_list.item(i)
-            for i in range(p._agents_list.count())}
+    return {item.text(0): item for item, _ in p._agent_rows()}
+
+
+def _agent_combos(p):
+    return {item.text(0): combo for item, combo in p._agent_rows()}
 
 
 def _save(p):
@@ -124,7 +127,7 @@ def test_mute_toggle_persists_and_reaches_the_service(qtbot):
     p = make_plugin(prefs)
     qtbot.addWidget(p.create_widget())
     p.load_settings()
-    _agent_items(p)["lightfall"].setCheckState(Qt.CheckState.Checked)
+    _agent_items(p)["lightfall"].setCheckState(0, Qt.CheckState.Checked)
     service = _save(p)
 
     loaded = VoiceSettings.from_preferences(prefs)
@@ -136,7 +139,7 @@ def test_mute_toggle_persists_and_reaches_the_service(qtbot):
     p2 = make_plugin(prefs)
     qtbot.addWidget(p2.create_widget())
     p2.load_settings()
-    assert _agent_items(p2)["lightfall"].checkState() == Qt.CheckState.Checked
+    assert _agent_items(p2)["lightfall"].checkState(0) == Qt.CheckState.Checked
 
 
 def test_mute_toggle_keeps_per_agent_voice(qtbot):
@@ -151,7 +154,54 @@ def test_mute_toggle_keeps_per_agent_voice(qtbot):
     p = make_plugin(prefs)
     qtbot.addWidget(p.create_widget())
     p.load_settings()
-    _agent_items(p)["observer"].setCheckState(Qt.CheckState.Unchecked)
+    _agent_items(p)["observer"].setCheckState(0, Qt.CheckState.Unchecked)
     _save(p)
     o = VoiceSettings.from_preferences(prefs).agent_overrides["observer"]
     assert (o.muted, o.voice) == (False, "af_sky")
+
+
+def test_default_voice_combo_defaults_to_af_heart_and_saves(qtbot):
+    prefs = FakePrefs()
+    p = make_plugin(prefs)
+    qtbot.addWidget(p.create_widget())
+    p.load_settings()
+    assert p._combo_voice(p._default_voice_combo) == "af_heart"
+
+    p._select_voice(p._default_voice_combo, "bf_emma")
+    _save(p)
+    assert VoiceSettings.from_preferences(prefs).default_voice == "bf_emma"
+
+
+def test_typed_default_voice_id_is_kept(qtbot):
+    prefs = FakePrefs()
+    p = make_plugin(prefs)
+    qtbot.addWidget(p.create_widget())
+    p.load_settings()
+    p._default_voice_combo.setEditText("zf_xiaoxiao")  # not in the catalogue
+    _save(p)
+    assert VoiceSettings.from_preferences(prefs).default_voice == "zf_xiaoxiao"
+
+
+def test_per_agent_voice_picker_saves_and_reloads(qtbot):
+    from PySide6.QtCore import Qt
+
+    prefs = FakePrefs()
+    p = make_plugin(prefs)
+    qtbot.addWidget(p.create_widget())
+    p.load_settings()
+    p._select_voice(_agent_combos(p)["lightfall"], "am_michael")
+    _agent_items(p)["lightfall"].setCheckState(0, Qt.CheckState.Checked)
+    _save(p)
+    o = VoiceSettings.from_preferences(prefs).agent_overrides["lightfall"]
+    assert (o.muted, o.voice) == (True, "am_michael")
+
+    p2 = make_plugin(prefs)
+    qtbot.addWidget(p2.create_widget())
+    p2.load_settings()
+    assert p2._combo_voice(_agent_combos(p2)["lightfall"]) == "am_michael"
+
+    # Back to the default voice and unmuted: nothing left to store.
+    p2._select_voice(_agent_combos(p2)["lightfall"], "")
+    _agent_items(p2)["lightfall"].setCheckState(0, Qt.CheckState.Unchecked)
+    _save(p2)
+    assert "lightfall" not in VoiceSettings.from_preferences(prefs).agent_overrides

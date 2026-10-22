@@ -17,8 +17,9 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
+    QHeaderView,
+    QTreeWidget,
+    QTreeWidgetItem,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -35,7 +36,9 @@ from lightfall_voice.policy import (
     VoiceSettings,
     muted_by_default,
     with_agent_muted,
+    with_agent_voice,
 )
+from lightfall_voice.voices import KOKORO_VOICES
 from lightfall_voice.stt import controller as controller_module
 from lightfall_voice.stt.controller import VoiceInputController, VoiceInputSettings
 
@@ -193,13 +196,24 @@ class VoiceSettingsPlugin(SettingsPlugin):
         daemon_form.addRow("Host", self._host_edit)
         daemon_form.addRow("Port", self._port_spin)
 
+        voices_box = QGroupBox("Voices")
+        voices_form = QFormLayout(voices_box)
+        self._default_voice_combo = self._voice_combo("Voice daemon's own default")
+        voices_form.addRow("Default voice", self._default_voice_combo)
+
         agents_box = QGroupBox("Agents")
         agents_layout = QVBoxLayout(agents_box)
         note = QLabel(
-            "Checked agents are muted. Permission requests and errors always speak."
+            "Checked agents are muted; permission requests and errors always speak. "
+            "Pick a voice per agent, or leave it on the default voice."
         )
         note.setWordWrap(True)
-        self._agents_list = QListWidget()
+        self._agents_list = QTreeWidget()
+        self._agents_list.setHeaderLabels(["Agent (checked = muted)", "Voice"])
+        self._agents_list.setRootIsDecorated(False)
+        self._agents_list.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
         agents_layout.addWidget(note)
         agents_layout.addWidget(self._agents_list)
 
@@ -208,6 +222,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
 
         layout.addWidget(self._enabled_check)
         layout.addWidget(events_box)
+        layout.addWidget(voices_box)
         layout.addWidget(agents_box)
         layout.addWidget(daemon_box)
         layout.addWidget(self._test_button)
@@ -304,23 +319,61 @@ class VoiceSettingsPlugin(SettingsPlugin):
             names.update(service.attached_agent_names())
         return names
 
+    @staticmethod
+    def _voice_combo(default_label: str) -> QComboBox:
+        """Editable voice picker: ``default_label`` (data "") then the known
+        Kokoro voices; any other Kokoro id can be typed."""
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItem(default_label, "")
+        for voice_id, label in KOKORO_VOICES:
+            combo.addItem(f"{voice_id} — {label}", voice_id)
+        return combo
+
+    @staticmethod
+    def _combo_voice(combo: QComboBox) -> str:
+        """The chosen voice id ("" = default); a typed id is taken verbatim."""
+        text = combo.currentText().strip()
+        index = combo.findText(text)
+        if index >= 0:
+            return combo.itemData(index) or ""
+        return text.split()[0] if text else ""
+
+    @staticmethod
+    def _select_voice(combo: QComboBox, voice: str | None) -> None:
+        index = combo.findData(voice or "")
+        if index < 0:
+            combo.addItem(voice, voice)  # an id the catalogue doesn't list
+            index = combo.count() - 1
+        combo.setCurrentIndex(index)
+
+    def _agent_rows(self):
+        """(item, voice combo) for each row of the Agents list."""
+        for row in range(self._agents_list.topLevelItemCount()):
+            item = self._agents_list.topLevelItem(row)
+            yield item, self._agents_list.itemWidget(item, 1)
+
     def _populate_agents(self, overrides: dict[str, AgentOverride]) -> None:
         self._agents_list.clear()
         for name in sorted(self._known_agent_names() | set(overrides)):
-            item = QListWidgetItem(name)
+            item = QTreeWidgetItem([name])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             override = overrides.get(name)
             muted = override.muted if override is not None else muted_by_default(name)
-            item.setCheckState(Qt.CheckState.Checked if muted else Qt.CheckState.Unchecked)
-            self._agents_list.addItem(item)
+            item.setCheckState(0, Qt.CheckState.Checked if muted else Qt.CheckState.Unchecked)
+            self._agents_list.addTopLevelItem(item)
+            combo = self._voice_combo("Default voice")
+            self._select_voice(combo, override.voice if override is not None else None)
+            self._agents_list.setItemWidget(item, 1, combo)
 
     def _agent_overrides(self, existing: dict[str, AgentOverride]) -> dict[str, AgentOverride]:
-        """Overrides from the list's check states; per-agent voices are kept."""
+        """Overrides from the list's check states and voice pickers."""
         overrides = dict(existing)
-        for row in range(self._agents_list.count()):
-            item = self._agents_list.item(row)
-            muted = item.checkState() == Qt.CheckState.Checked
-            overrides = with_agent_muted(overrides, item.text(), muted)
+        for item, combo in self._agent_rows():
+            name = item.text(0)
+            overrides = with_agent_voice(overrides, name, self._combo_voice(combo))
+            muted = item.checkState(0) == Qt.CheckState.Checked
+            overrides = with_agent_muted(overrides, name, muted)
         return overrides
 
     def _on_widget_destroyed(self) -> None:
@@ -342,6 +395,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
         self._errors_check.setChecked(s.errors)
         self._host_edit.setText(s.daemon_host)
         self._port_spin.setValue(s.daemon_port)
+        self._select_voice(self._default_voice_combo, s.default_voice)
         self._populate_agents(s.agent_overrides)
 
         i = VoiceInputSettings.from_preferences(self._preferences())
@@ -372,6 +426,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
             errors=self._errors_check.isChecked(),
             daemon_host=self._host_edit.text().strip(),
             daemon_port=self._port_spin.value(),
+            default_voice=self._combo_voice(self._default_voice_combo),
             agent_overrides=self._agent_overrides(existing.agent_overrides),
         )
         s.to_preferences(prefs)

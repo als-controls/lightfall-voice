@@ -14,7 +14,7 @@ def make_policy(**settings_kwargs):
 def test_primary_agent_tool_event_speaks():
     p = make_policy()
     assert p.decide(tool_event("lightfall", "Read", "Reading loader", 100.0), now=100.0) == (
-        "Reading loader", None,
+        "Reading loader", "af_heart",
     )
 
 
@@ -32,9 +32,9 @@ def test_event_kind_toggles():
 def test_non_primary_session_speaks_by_default():
     p = make_policy()
     assert p.decide(tool_event("observer", "Read", "Reading x", 0.0), now=0.0) == (
-        "Reading x", None,
+        "Reading x", "af_heart",
     )
-    assert p.decide(summary_event("observer", "Done", 0.0), now=0.0) == ("Done", None)
+    assert p.decide(summary_event("observer", "Done", 0.0), now=0.0) == ("Done", "af_heart")
 
 
 def test_muted_override_silences_low_priority():
@@ -42,6 +42,30 @@ def test_muted_override_silences_low_priority():
     assert p.decide(tool_event("observer", "Read", "Reading x", 0.0), now=0.0) is None
     assert p.decide(summary_event("observer", "Done", 0.0), now=0.0) is None
     assert p.decide(tool_event("lightfall", "Read", "Reading x", 0.0), now=0.0) is not None
+
+
+def test_default_voice_is_the_ascribe_link_voice():
+    assert VoiceSettings().default_voice == "af_heart"
+
+
+def test_default_voice_applies_to_agents_without_their_own():
+    p = make_policy(default_voice="bf_emma",
+                    agent_overrides={"observer": AgentOverride(voice="am_adam")})
+    assert p.decide(summary_event("lightfall", "Done", 0.0), now=0.0) == ("Done", "bf_emma")
+    assert p.decide(summary_event("observer", "Done", 0.0), now=0.0) == ("Done", "am_adam")
+
+
+def test_empty_default_voice_defers_to_the_daemon():
+    p = make_policy(default_voice="")
+    assert p.decide(summary_event("lightfall", "Done", 0.0), now=0.0) == ("Done", None)
+
+
+def test_with_agent_voice_keeps_mute_and_drops_redundant_entries():
+    from lightfall_voice.policy import with_agent_voice
+
+    o = with_agent_voice({"x": AgentOverride(muted=True)}, "x", "am_adam")
+    assert (o["x"].muted, o["x"].voice) == (True, "am_adam")
+    assert with_agent_voice({"y": AgentOverride(voice="am_adam")}, "y", "") == {}
 
 
 def test_voice_only_override_is_not_a_mute():
@@ -52,7 +76,7 @@ def test_voice_only_override_is_not_a_mute():
 def test_subagent_high_priority_speaks_by_default():
     p = make_policy()
     out = p.decide(error_event("alignment", "Agent alignment error. Attention needed", 0.0), now=0.0)
-    assert out == ("Agent alignment error. Attention needed", None)
+    assert out == ("Agent alignment error. Attention needed", "af_heart")
 
 
 def test_subagent_unmuted_override_speaks_with_voice():
@@ -101,7 +125,7 @@ def test_settings_preferences_roundtrip():
 
     prefs = FakePrefs()
     s = VoiceSettings(
-        enabled=False, tools=False, daemon_port=9999,
+        enabled=False, tools=False, daemon_port=9999, default_voice="bm_george",
         agent_overrides={"alignment": AgentOverride(muted=False, voice="af_sky")},
     )
     s.to_preferences(prefs)

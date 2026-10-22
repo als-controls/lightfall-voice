@@ -48,7 +48,7 @@ def test_high_priority_no_ttl_kept(qtbot):
     clock["t"] += 600.0
     service.release()
     client.speak.assert_called_once_with(
-        "Permission needed to run a command", voice=None, ttl=None
+        "Permission needed to run a command", voice="af_heart", ttl=None
     )
 
 
