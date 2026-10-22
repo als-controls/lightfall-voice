@@ -128,6 +128,44 @@ def test_device_error_emits_failed(qtbot):
     assert src.stopped
 
 
+class _ShadowEnum:
+    """Mimics a PySide6 enum member that is value-equal to ``QAudio.Error`` but a
+    distinct object whose ``==``/``!=`` disagree with the module-level enum.
+
+    On PySide6 6.11.0 ``QAudioSource.error()`` returns such a shadow of
+    ``QAudio.Error.NoError``: ``err == QAudio.Error.NoError`` is ``False`` even
+    though ``err.value == 0``. The recorder must decide by ``.value``.
+    """
+
+    def __init__(self, value, name):
+        self.value = value
+        self.name = name
+
+    def __eq__(self, other):  # never equal to the real enum (the quirk)
+        return False
+
+    def __ne__(self, other):
+        return True
+
+
+def test_noerror_state_change_does_not_fail(qtbot):
+    """A stateChanged whose error() is NoError-by-value (shadow enum) must not
+    be reported as a failure — the regression behind "Audio input error: NoError"."""
+    rec, src, chunks, _, errors = make()
+    src._error = _ShadowEnum(QAudio.Error.NoError.value, "NoError")
+    src.stateChanged.emit(QAudio.State.IdleState)
+    assert errors == []
+    assert rec.is_recording
+
+
+def test_shadow_enum_real_error_still_reported(qtbot):
+    rec, src, chunks, _, errors = make()
+    src._error = _ShadowEnum(QAudio.Error.IOError.value, "IOError")
+    src.stateChanged.emit(QAudio.State.StoppedState)
+    assert len(errors) == 1 and "IOError" in errors[0]
+    assert not rec.is_recording
+
+
 def test_stop_flushes_nothing_partial(qtbot):
     rec, src, chunks, _, _ = make()
     src.pipe.feed(b"\x01\x00" * 1000)  # less than one chunk

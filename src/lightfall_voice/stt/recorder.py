@@ -35,6 +35,24 @@ def _requested_format() -> QAudioFormat:
     return fmt
 
 
+def _is_error(err) -> bool:
+    """True if ``err`` is a real QAudio error (not ``NoError``).
+
+    Compare by numeric ``.value`` rather than by enum identity/equality: on some
+    PySide6 builds (observed on 6.11.0) the ``QAudio.Error`` instance returned by
+    ``QAudioSource.error()`` belongs to a *different* enum class object than the
+    module-level ``QAudio.Error.NoError`` attribute, so ``err == QAudio.Error.NoError``
+    is ``False`` — and ``!=`` is ``True`` — even when both are ``NoError`` (value 0).
+    That false positive made the recorder tear down and report "Audio input error:
+    NoError" on the first normal ``stateChanged`` to ``IdleState``.
+    """
+    return getattr(err, "value", err) != QAudio.Error.NoError.value
+
+
+def _err_name(err) -> str:
+    return getattr(err, "name", str(err))
+
+
 def _is_native(fmt: QAudioFormat) -> bool:
     return (
         fmt.sampleRate() == RATE
@@ -119,7 +137,7 @@ class Recorder(QObject):
         if self._io is None:
             err = self._source.error()
             self._teardown()
-            self.failed.emit(f"Could not open microphone: {getattr(err, 'name', err)}")
+            self.failed.emit(f"Could not open microphone: {_err_name(err)}")
             return
         actual = self._source.format() if callable(getattr(self._source, "format", None)) else fmt
         if actual.sampleFormat() not in _SAMPLE_WIDTHS:
@@ -165,10 +183,10 @@ class Recorder(QObject):
         if not self._recording or self._source is None:
             return
         err = self._source.error()
-        if err != QAudio.Error.NoError:
+        if _is_error(err):
             self._recording = False
             self._teardown()
-            self.failed.emit(f"Audio input error: {getattr(err, 'name', err)}")
+            self.failed.emit(f"Audio input error: {_err_name(err)}")
 
     def _on_ready(self) -> None:
         if not self._recording or self._io is None:
