@@ -72,6 +72,38 @@ def test_result_speaks_buffered_message(qtbot):
     client.speak.assert_called_once_with("Fixed the flaky test.", voice=None, ttl=10.0)
 
 
+def test_result_speaks_its_own_text_without_message_received(qtbot):
+    """Streaming sessions never emit message_received; the text rides on the result."""
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.result_received.emit({"session_id": "s1", "text": "Pong, still here."})
+    client.speak.assert_called_once_with("Pong, still here.", voice=None, ttl=10.0)
+
+
+def test_result_text_wins_over_buffered_message(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.message_received.emit("Let me check.")
+    w.agent.result_received.emit({"text": "All done."})
+    client.speak.assert_called_once_with("All done.", voice=None, ttl=10.0)
+    client.speak.reset_mock()
+    w.agent.result_received.emit({"text": ""})  # buffer was consumed too
+    client.speak.assert_not_called()
+
+
+def test_mcp_tool_call_is_announced(qtbot):
+    w = StubWidget()
+    service, client, _ = make_service(qtbot, [w])
+    w.agent.tool_called.emit("mcp__lightfall__lightfall_read_device", {})
+    client.speak.assert_called_once_with("Reading device", voice=None, ttl=10.0)
+
+
+def test_attached_agent_names(qtbot):
+    a, b = StubWidget(), BusEndpointStubWidget(agent_name="observer")
+    service, _, _ = make_service(qtbot, [a, b])
+    assert service.attached_agent_names() == ["lightfall", "observer"]
+
+
 def test_result_without_prior_message_is_silent(qtbot):
     w = StubWidget()
     service, client, _ = make_service(qtbot, [w])

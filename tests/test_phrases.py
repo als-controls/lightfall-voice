@@ -21,12 +21,42 @@ def test_search_tools():
 
 
 def test_silent_tools_return_none():
-    assert phrases.tool_announcement("TodoWrite", {}) is None
-    assert phrases.tool_announcement("Task", {}) is None
+    for tool in ("TodoWrite", "Task", "Agent", "ToolSearch"):
+        assert phrases.tool_announcement(tool, {}) is None
 
 
-def test_unknown_tool_returns_none():
-    assert phrases.tool_announcement("SomeMcpTool", {}) is None
+def test_unknown_tool_is_humanized_not_silent():
+    assert phrases.tool_announcement("lightfall_read_device", {}) == "Reading device"
+    assert phrases.tool_announcement("lightfall_run_plan", {}) == "Running plan"
+    assert phrases.tool_announcement("lightfall_move_motor", {}) == "Moving motor"
+    assert phrases.tool_announcement("SomeMcpTool", {}) == "Using some mcp tool"
+
+
+def test_mcp_prefix_is_stripped():
+    assert (
+        phrases.tool_announcement("mcp__ipython_tools__lightfall_ipython_execute", {})
+        == "Executing ipython"
+    )
+    assert phrases.tool_announcement("mcp__qt__click_widget", {}) == "Clicking widget"
+
+
+def test_mcp_prefixed_core_and_silent_tools_use_their_table_entry():
+    assert phrases.tool_announcement("mcp__x__Bash", {}) == "Running a command"
+    assert phrases.tool_announcement("mcp__lightfall__lightfall_set_emotion", {}) is None
+
+
+def test_verb_found_mid_name():
+    assert (
+        phrases.tool_announcement("lightfall_ipython_push_variable", {})
+        == "Pushing ipython variable"
+    )
+
+
+def test_permission_phrase_humanizes_mcp_tools():
+    assert (
+        phrases.permission_phrase("mcp__lightfall__lightfall_move_motor")
+        == "Permission needed to use move motor"
+    )
 
 
 def test_permission_phrase_contains_permission_keyword():

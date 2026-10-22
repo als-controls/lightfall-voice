@@ -75,8 +75,16 @@ class VoiceSettings:
         )
 
 
+PRIMARY_AGENT = "lightfall"
+
+
+def muted_by_default(agent_name: str, primary_agent: str = PRIMARY_AGENT) -> bool:
+    """Mute state of an agent with no override in voice.agent_overrides."""
+    return agent_name != primary_agent
+
+
 class VoicePolicy:
-    def __init__(self, settings: VoiceSettings, primary_agent: str = "lightfall") -> None:
+    def __init__(self, settings: VoiceSettings, primary_agent: str = PRIMARY_AGENT) -> None:
         self.settings = settings
         self.primary_agent = primary_agent
         self._last_tool_time: dict[tuple[str, str], float] = {}
@@ -96,11 +104,13 @@ class VoicePolicy:
             return None
 
         override = s.agent_overrides.get(event.agent_name)
-        is_primary = event.agent_name == self.primary_agent
-        # Subagents are muted by default; explicit overrides win either way.
-        # High-priority events (permission, error) always break through mutes.
+        # Explicit overrides win; high-priority events (permission, error)
+        # always break through mutes.
         if event.priority != "high":
-            muted = override.muted if override is not None else not is_primary
+            muted = (
+                override.muted if override is not None
+                else muted_by_default(event.agent_name, self.primary_agent)
+            )
             if muted:
                 return None
             if now - event.timestamp > TTL_SECONDS:

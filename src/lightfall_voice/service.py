@@ -25,9 +25,7 @@ from lightfall_voice.events import (
     summary_event,
     tool_event,
 )
-from lightfall_voice.policy import VoicePolicy, VoiceSettings
-
-PRIMARY_AGENT = "lightfall"
+from lightfall_voice.policy import PRIMARY_AGENT, VoicePolicy, VoiceSettings
 
 _service: "VoiceService | None" = None
 
@@ -70,9 +68,12 @@ class VoiceService(QObject):
         # Track attached agents by id() so rescans are idempotent. Keep a
         # real reference too: Qt disconnects automatically on destruction.
         self._attached: dict[int, QObject] = {}
+        self._attached_names: dict[int, str] = {}
         self._bus = None
-        # Buffer the latest non-empty message text per agent (by name), so
-        # result_received (which carries no message text) can speak it.
+        # Fallback for backends that don't put the turn's final text on
+        # result_received (info["text"]): the latest non-empty
+        # message_received text per agent (by name). Claude Code sessions
+        # stream, so message_received never fires for them.
         self._last_message: dict[str, str] = {}
         # hold()/release(): while the counter is > 0 events queue instead of
         # speaking. The lock guards the counter, queue and drain flag because
@@ -137,12 +138,17 @@ class VoiceService(QObject):
             self._bus = None
         self._client.stop()
         self._attached.clear()
+        self._attached_names.clear()
 
     def apply_settings(self, settings: VoiceSettings) -> None:
         old_last_tool_time = self._policy._last_tool_time
         self._policy = VoicePolicy(settings, primary_agent=PRIMARY_AGENT)
         self._policy._last_tool_time = old_last_tool_time
         self._client.configure(settings.daemon_host, settings.daemon_port)
+
+    def attached_agent_names(self) -> list[str]:
+        """Names of the live sessions this service speaks for, sorted."""
+        return sorted(set(self._attached_names.values()))
 
     def speak_test(self, message: str = "Voice notifications are working") -> None:
         """Speak a test message directly, bypassing policy."""
@@ -181,13 +187,18 @@ class VoiceService(QObject):
                 lambda _rid, tool, _ti, n=agent_name: self._on_permission(n, tool)
             )
             agent.destroyed.connect(
-                lambda _=None, key=id(agent): self._attached.pop(key, None)
+                lambda _=None, key=id(agent): self._forget(key)
             )
         except AttributeError:
             logger.debug("lightfall-voice: widget agent lacks expected signals; skipped")
             return
         self._attached[id(agent)] = agent
+        self._attached_names[id(agent)] = agent_name
         logger.info("lightfall-voice: attached to agent session '{}'", agent_name)
+
+    def _forget(self, key: int) -> None:
+        self._attached.pop(key, None)
+        self._attached_names.pop(key, None)
 
     def _resolve_agent_name(self, widget) -> str:
         endpoint = getattr(widget, "bus_endpoint", None)
@@ -209,6 +220,10 @@ class VoiceService(QObject):
     def _speak_event(self, event: VoiceEvent, now: float) -> None:
         decision = self._policy.decide(event, now=now)
         if decision is None:
+            logger.debug(
+                "lightfall-voice: dropped {} event from '{}' (policy)",
+                event.kind, event.agent_name,
+            )
             return
         text, voice = decision
         self._client.speak(text, voice=voice, ttl=self._ttl_for(event))
@@ -225,6 +240,7 @@ class VoiceService(QObject):
         try:
             text = phrases.tool_announcement(tool, tool_input or {})
             if text is None:
+                logger.debug("lightfall-voice: tool '{}' is silent", tool)
                 return
             self._dispatch(tool_event(agent_name, tool, text, self._clock()))
         except Exception:
@@ -240,9 +256,12 @@ class VoiceService(QObject):
     def _on_result(self, agent_name: str, result: dict) -> None:
         try:
             buffered = self._last_message.pop(agent_name, None)
-            if not buffered:
+            final = result.get("text") if isinstance(result, dict) else None
+            source = final or buffered
+            if not source:
+                logger.debug("lightfall-voice: turn from '{}' ended with no text", agent_name)
                 return
-            text = phrases.completion_phrase(buffered)
+            text = phrases.completion_phrase(source)
             if text is None:
                 return
             self._dispatch(summary_event(agent_name, text, self._clock()))

@@ -3,7 +3,7 @@ on_loaded() (preload) starts them; save_settings() re-applies policy and voice i
 
 from __future__ import annotations
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtWidgets import (
@@ -15,7 +15,10 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QKeySequenceEdit,
+    QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -26,7 +29,7 @@ from lightfall.plugins.settings_plugin import SettingsPlugin
 from lightfall.utils.logging import logger
 
 from lightfall_voice import service as service_module
-from lightfall_voice.policy import VoiceSettings
+from lightfall_voice.policy import AgentOverride, VoiceSettings, muted_by_default
 from lightfall_voice.stt import controller as controller_module
 from lightfall_voice.stt.controller import VoiceInputController, VoiceInputSettings
 
@@ -166,11 +169,22 @@ class VoiceSettingsPlugin(SettingsPlugin):
         daemon_form.addRow("Host", self._host_edit)
         daemon_form.addRow("Port", self._port_spin)
 
+        agents_box = QGroupBox("Agents")
+        agents_layout = QVBoxLayout(agents_box)
+        note = QLabel(
+            "Checked agents are muted. Permission requests and errors always speak."
+        )
+        note.setWordWrap(True)
+        self._agents_list = QListWidget()
+        agents_layout.addWidget(note)
+        agents_layout.addWidget(self._agents_list)
+
         self._test_button = QPushButton("Test voice")
         self._test_button.clicked.connect(self._on_test_clicked)
 
         layout.addWidget(self._enabled_check)
         layout.addWidget(events_box)
+        layout.addWidget(agents_box)
         layout.addWidget(daemon_box)
         layout.addWidget(self._test_button)
         layout.addWidget(self._build_input_box())
@@ -251,6 +265,45 @@ class VoiceSettingsPlugin(SettingsPlugin):
             index = combo.count() - 1
         combo.setCurrentIndex(index)
 
+    @staticmethod
+    def _known_agent_names() -> set[str]:
+        """Agent specs plus live sessions: every name a session tab can carry."""
+        names: set[str] = {service_module.PRIMARY_AGENT}
+        try:
+            from lightfall.agents.registry import AgentSpecRegistry
+
+            names.update(spec.name for spec in AgentSpecRegistry.get_instance().specs())
+        except Exception:
+            logger.debug("lightfall-voice: agent registry unavailable for the mute list")
+        service = service_module.get_service()
+        if service is not None:
+            names.update(service.attached_agent_names())
+        return names
+
+    def _populate_agents(self, overrides: dict[str, AgentOverride]) -> None:
+        self._agents_list.clear()
+        for name in sorted(self._known_agent_names() | set(overrides)):
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            override = overrides.get(name)
+            muted = override.muted if override is not None else muted_by_default(name)
+            item.setCheckState(Qt.CheckState.Checked if muted else Qt.CheckState.Unchecked)
+            self._agents_list.addItem(item)
+
+    def _agent_overrides(self, existing: dict[str, AgentOverride]) -> dict[str, AgentOverride]:
+        """Overrides from the list's check states; per-agent voices are kept."""
+        overrides = dict(existing)
+        for row in range(self._agents_list.count()):
+            item = self._agents_list.item(row)
+            name = item.text()
+            muted = item.checkState() == Qt.CheckState.Checked
+            voice = existing[name].voice if name in existing else None
+            if muted == muted_by_default(name) and voice is None:
+                overrides.pop(name, None)  # matches the default: nothing to store
+            else:
+                overrides[name] = AgentOverride(muted=muted, voice=voice)
+        return overrides
+
     def _on_widget_destroyed(self) -> None:
         self._widget = None
 
@@ -270,6 +323,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
         self._errors_check.setChecked(s.errors)
         self._host_edit.setText(s.daemon_host)
         self._port_spin.setValue(s.daemon_port)
+        self._populate_agents(s.agent_overrides)
 
         i = VoiceInputSettings.from_preferences(self._preferences())
         self._input_enabled_check.setChecked(i.enabled)
@@ -299,7 +353,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
             errors=self._errors_check.isChecked(),
             daemon_host=self._host_edit.text().strip(),
             daemon_port=self._port_spin.value(),
-            agent_overrides=existing.agent_overrides,
+            agent_overrides=self._agent_overrides(existing.agent_overrides),
         )
         s.to_preferences(prefs)
         service = service_module.get_service()

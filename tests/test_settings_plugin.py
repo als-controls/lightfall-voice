@@ -82,3 +82,76 @@ def test_test_button_speaks(qtbot):
         service.speak_test.assert_called_once()
     finally:
         service_module.set_service(None)
+
+
+def _agent_items(p):
+    return {p._agents_list.item(i).text(): p._agents_list.item(i)
+            for i in range(p._agents_list.count())}
+
+
+def _save(p):
+    service = MagicMock()
+    service_module.set_service(service)
+    try:
+        p.save_settings()
+    finally:
+        service_module.set_service(None)
+    return service
+
+
+def test_mute_list_lists_primary_live_sessions_and_saved_overrides(qtbot):
+    from lightfall_voice.policy import AgentOverride
+
+    prefs = FakePrefs()
+    VoiceSettings(agent_overrides={"old-agent": AgentOverride(muted=True)}).to_preferences(prefs)
+    p = make_plugin(prefs)
+    qtbot.addWidget(p.create_widget())
+    service = MagicMock()
+    service.attached_agent_names.return_value = ["xpcs-analysis"]
+    service_module.set_service(service)
+    try:
+        p.load_settings()
+    finally:
+        service_module.set_service(None)
+    names = set(_agent_items(p))
+    assert {"lightfall", "xpcs-analysis", "old-agent"} <= names
+
+
+def test_mute_toggle_persists_and_reaches_the_service(qtbot):
+    from PySide6.QtCore import Qt
+
+    prefs = FakePrefs()
+    p = make_plugin(prefs)
+    qtbot.addWidget(p.create_widget())
+    p.load_settings()
+    _agent_items(p)["lightfall"].setCheckState(Qt.CheckState.Checked)
+    service = _save(p)
+
+    loaded = VoiceSettings.from_preferences(prefs)
+    assert loaded.agent_overrides["lightfall"].muted is True
+    applied = service.apply_settings.call_args.args[0]
+    assert applied.agent_overrides["lightfall"].muted is True
+
+    # Reopen: the check state reflects the stored mute.
+    p2 = make_plugin(prefs)
+    qtbot.addWidget(p2.create_widget())
+    p2.load_settings()
+    assert _agent_items(p2)["lightfall"].checkState() == Qt.CheckState.Checked
+
+
+def test_mute_toggle_keeps_per_agent_voice(qtbot):
+    from PySide6.QtCore import Qt
+
+    from lightfall_voice.policy import AgentOverride
+
+    prefs = FakePrefs()
+    VoiceSettings(
+        agent_overrides={"observer": AgentOverride(muted=True, voice="af_sky")}
+    ).to_preferences(prefs)
+    p = make_plugin(prefs)
+    qtbot.addWidget(p.create_widget())
+    p.load_settings()
+    _agent_items(p)["observer"].setCheckState(Qt.CheckState.Unchecked)
+    _save(p)
+    o = VoiceSettings.from_preferences(prefs).agent_overrides["observer"]
+    assert (o.muted, o.voice) == (False, "af_sky")
