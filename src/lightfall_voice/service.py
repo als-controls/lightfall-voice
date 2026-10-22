@@ -8,11 +8,12 @@ is injected and unit-testable without lightfall widgets.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from typing import Callable
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Signal
 
 from lightfall.utils.logging import logger
 
@@ -25,7 +26,12 @@ from lightfall_voice.events import (
     summary_event,
     tool_event,
 )
-from lightfall_voice.policy import VoicePolicy, VoiceSettings
+from lightfall_voice.policy import (
+    VoicePolicy,
+    VoiceSettings,
+    muted_by_default,
+    with_agent_muted,
+)
 
 # Name for a session whose widget carries none. Spoken phrases omit it, so
 # the main assistant's errors and permission requests aren't name-prefixed.
@@ -55,6 +61,10 @@ def default_widget_scanner() -> list:
 
 
 class VoiceService(QObject):
+    # Emitted after apply_settings(), e.g. a mute toggled from the panel's
+    # title bar or the preferences page.
+    settings_changed = Signal()
+
     def __init__(
         self,
         settings: VoiceSettings,
@@ -149,6 +159,30 @@ class VoiceService(QObject):
         self._policy = VoicePolicy(settings)
         self._policy._last_tool_time = old_last_tool_time
         self._client.configure(settings.daemon_host, settings.daemon_port)
+        self.settings_changed.emit()
+
+    @property
+    def settings(self) -> VoiceSettings:
+        return self._policy.settings
+
+    def is_agent_muted(self, agent_name: str) -> bool:
+        override = self.settings.agent_overrides.get(agent_name)
+        return override.muted if override is not None else muted_by_default(agent_name)
+
+    def set_agent_muted(self, agent_name: str, muted: bool) -> VoiceSettings:
+        """Mute or unmute one agent live; returns the new settings to persist."""
+        settings = dataclasses.replace(
+            self.settings,
+            agent_overrides=with_agent_muted(
+                self.settings.agent_overrides, agent_name, muted
+            ),
+        )
+        self.apply_settings(settings)
+        return settings
+
+    def agent_name_of(self, widget) -> str:
+        """The name this service speaks for ``widget``'s session under."""
+        return self._resolve_agent_name(widget)
 
     def attached_agent_names(self) -> list[str]:
         """Names of the live sessions this service speaks for, sorted."""

@@ -14,9 +14,10 @@ the local Kokoro voice daemon from `~/.claude/hooks/voice_notifications`
   Task, Agent and ToolSearch stay silent. Rate-limited to one per tool per 3 s
 - **Errors** — "Agent error. Attention needed"
 
-Every session tab speaks by default. Mute one under **Preferences → Voice
-Notifications → Agents**; a muted agent's permission requests and errors
-still speak. Agents other than the main `lightfall` assistant are named in
+Every session tab speaks by default. Mute the visible tab with the speaker
+button in the Assistant panel's title bar, or any agent under **Preferences →
+Voice Notifications → Agents**; a muted agent's permission requests and
+errors still speak. Agents other than the main `lightfall` assistant are named in
 those phrases. Low-priority events older than 10 s are dropped, never
 spoken late.
 

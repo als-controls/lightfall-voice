@@ -29,7 +29,13 @@ from lightfall.plugins.settings_plugin import SettingsPlugin
 from lightfall.utils.logging import logger
 
 from lightfall_voice import service as service_module
-from lightfall_voice.policy import AgentOverride, VoiceSettings, muted_by_default
+from lightfall_voice.mute_action import SessionMuteAction
+from lightfall_voice.policy import (
+    AgentOverride,
+    VoiceSettings,
+    muted_by_default,
+    with_agent_muted,
+)
 from lightfall_voice.stt import controller as controller_module
 from lightfall_voice.stt.controller import VoiceInputController, VoiceInputSettings
 
@@ -49,6 +55,7 @@ LANGUAGES = (
 )
 
 _controller: VoiceInputController | None = None
+_mute_action: SessionMuteAction | None = None
 
 
 def get_controller() -> VoiceInputController | None:
@@ -104,7 +111,24 @@ class VoiceSettingsPlugin(SettingsPlugin):
             # Voice input does not need spoken notifications: carry on without holds.
             logger.exception("lightfall-voice: failed to start VoiceService")
             service = None
+        if service is not None:
+            self._start_mute_action(service)
         self._start_voice_input(service)
+
+    def _start_mute_action(self, service) -> None:
+        """Title-bar mute button. The Assistant panel doesn't exist yet at
+        preload, so install on every AgentBus.agents_changed (idempotent)."""
+        global _mute_action
+        try:
+            _mute_action = SessionMuteAction(
+                service, save=lambda s: s.to_preferences(self._preferences())
+            )
+            from lightfall.agents.bus import AgentBus
+
+            AgentBus.get_instance().agents_changed.connect(_mute_action.install)
+            _mute_action.install()
+        except Exception:
+            logger.exception("lightfall-voice: failed to set up the mute button")
 
     def _start_voice_input(self, service) -> None:
         """Create and start the voice input controller (after VoiceService).
@@ -295,13 +319,8 @@ class VoiceSettingsPlugin(SettingsPlugin):
         overrides = dict(existing)
         for row in range(self._agents_list.count()):
             item = self._agents_list.item(row)
-            name = item.text()
             muted = item.checkState() == Qt.CheckState.Checked
-            voice = existing[name].voice if name in existing else None
-            if muted == muted_by_default(name) and voice is None:
-                overrides.pop(name, None)  # matches the default: nothing to store
-            else:
-                overrides[name] = AgentOverride(muted=muted, voice=voice)
+            overrides = with_agent_muted(overrides, item.text(), muted)
         return overrides
 
     def _on_widget_destroyed(self) -> None:

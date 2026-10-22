@@ -85,6 +85,23 @@ def muted_by_default(agent_name: str) -> bool:
     return False
 
 
+def with_agent_muted(
+    overrides: dict[str, AgentOverride], agent_name: str, muted: bool
+) -> dict[str, AgentOverride]:
+    """``overrides`` with ``agent_name``'s mute set; its voice is kept.
+
+    An entry that would only restate the default is dropped, so the stored
+    overrides stay a pure opt-out list.
+    """
+    out = dict(overrides)
+    voice = out[agent_name].voice if agent_name in out else None
+    if muted == muted_by_default(agent_name) and voice is None:
+        out.pop(agent_name, None)
+    else:
+        out[agent_name] = AgentOverride(muted=muted, voice=voice)
+    return out
+
+
 class VoicePolicy:
     def __init__(self, settings: VoiceSettings) -> None:
         self.settings = settings
