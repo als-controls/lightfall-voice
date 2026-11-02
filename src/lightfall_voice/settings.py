@@ -1,46 +1,47 @@
-"""Voice settings page. Owns the VoiceService and VoiceInputController lifecycles:
-on_loaded() (preload) starts them; save_settings() re-applies policy and voice input."""
+"""Voice Notifications settings page (a scope-aware form page).
+
+Owns the VoiceService and VoiceInputController lifecycles: on_loaded() (preload)
+starts them; after_save() re-applies the saved notification and voice input
+settings to them. The voice daemon address and this machine's voice input keys
+(device, microphone, model folder, interpreter) belong to this console; every
+other ``voice.*`` key is a per-user setting.
+"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QCoreApplication, Qt
-from PySide6.QtGui import QKeySequence
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any
+
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtMultimedia import QMediaDevices
-from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
-    QFileDialog,
-    QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QKeySequenceEdit,
-    QLabel,
-    QLineEdit,
-    QHeaderView,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QPushButton,
-    QSpinBox,
-    QVBoxLayout,
-    QWidget,
-)
 
 from lightfall.plugins.settings_plugin import SettingsPlugin
+from lightfall.ui.preferences.form.schema import (
+    Action,
+    Choice,
+    Custom,
+    Integer,
+    Number,
+    Path,
+    Section,
+    SettingField,
+    Text,
+    Toggle,
+)
+from lightfall.ui.preferences.manager import PreferencesManager
 from lightfall.utils.logging import logger
 
 from lightfall_voice import service as service_module
 from lightfall_voice.mute_action import SessionMuteAction
-from lightfall_voice.policy import (
-    AgentOverride,
-    VoiceSettings,
-    muted_by_default,
-    with_agent_muted,
-    with_agent_voice,
-)
-from lightfall_voice.voices import KOKORO_VOICES
+from lightfall_voice.policy import VoiceSettings
+from lightfall_voice.settings_editors import agent_voices_editor, hotkey_editor, voice_choice_editor
 from lightfall_voice.stt import controller as controller_module
 from lightfall_voice.stt.controller import VoiceInputController, VoiceInputSettings
+
+if TYPE_CHECKING:
+    from lightfall_settings import SettingSpec
+
+    from lightfall.ui.preferences.form.schema import EditorSpec, FormValues
 
 MODELS = ("base", "small", "medium", "large-v3", "distil-large-v3")
 DEVICES = (("Auto (GPU if available)", "auto"), ("GPU", "gpu"), ("CPU", "cpu"))
@@ -57,6 +58,38 @@ LANGUAGES = (
     ("Korean", "ko"),
 )
 
+AGENTS_NOTE = (
+    "Checked agents are muted; permission requests and errors always speak. "
+    "Pick a voice per agent, or leave it on the default voice."
+)
+
+# This console's keys: the daemon it talks to and its own voice input hardware and paths.
+CONSOLE_KEYS = (
+    "voice.daemon_host",
+    "voice.daemon_port",
+    "voice.input.model_dir",
+    "voice.input.python",
+    "voice.input.input_device",
+    "voice.input.device",
+)
+
+# Per-user keys: (key, type, label).
+_USER_SPECS = (
+    ("voice.enabled", bool, "Enable voice notifications"),
+    ("voice.events.tools", bool, "Tool announcements"),
+    ("voice.events.summary", bool, "Turn summaries"),
+    ("voice.events.permission", bool, "Permission requests"),
+    ("voice.events.errors", bool, "Errors"),
+    ("voice.default_voice", str, "Default voice"),
+    ("voice.agent_overrides", dict, "Agents"),
+    ("voice.input.enabled", bool, "Enable voice input"),
+    ("voice.input.hotkey", str, "Hotkey"),
+    ("voice.input.model", str, "Model"),
+    ("voice.input.language", str, "Language"),
+    ("voice.input.silence_s", float, "Silence"),
+)
+_LABELS = {key: label for key, _type, label in _USER_SPECS}
+
 _controller: VoiceInputController | None = None
 _mute_action: SessionMuteAction | None = None
 
@@ -70,12 +103,28 @@ def set_controller(controller: VoiceInputController | None) -> None:
     _controller = controller
 
 
-class VoiceSettingsPlugin(SettingsPlugin):
-    def __init__(self) -> None:
-        super().__init__()
-        self._prefs = None  # test seam; resolved lazily via _preferences()
-        self._widget: QWidget | None = None
+def _input_devices() -> list[tuple[str, str]]:
+    """"System default" ("") then this machine's microphones, listed when the page is shown."""
+    options = [("", "System default")]
+    for device in QMediaDevices.audioInputs():
+        options.append((bytes(device.id()).decode(), device.description()))
+    return options
 
+
+def _test_voice() -> str:
+    """Speak the test phrase through the running service (runs on a worker thread)."""
+    service = service_module.get_service()
+    if service is None:
+        return "Voice service not running"
+    service.speak_test()
+    return "Spoken"
+
+
+def _field(key: str, editor: EditorSpec, *, label: str = "", **kwargs: Any) -> SettingField:
+    return SettingField(key, editor, label=label or _LABELS.get(key, ""), **kwargs)
+
+
+class VoiceSettingsPlugin(SettingsPlugin):
     # -- identity ------------------------------------------------------------
 
     @property
@@ -96,12 +145,9 @@ class VoiceSettingsPlugin(SettingsPlugin):
 
     # -- lifecycle -------------------------------------------------------------
 
-    def _preferences(self):
-        if self._prefs is None:
-            from lightfall.ui.preferences.manager import PreferencesManager
-
-            self._prefs = PreferencesManager.get_instance()
-        return self._prefs
+    @staticmethod
+    def _preferences():
+        return PreferencesManager.get_instance()
 
     def on_loaded(self) -> None:
         service = None
@@ -170,284 +216,79 @@ class VoiceSettingsPlugin(SettingsPlugin):
         except Exception:
             logger.exception("lightfall-voice: failed to start voice input")
 
-    # -- widget ---------------------------------------------------------------
+    # -- schema ----------------------------------------------------------------
 
-    def create_widget(self, parent: QWidget | None = None) -> QWidget:
-        widget = QWidget(parent)
-        layout = QVBoxLayout(widget)
+    def console_keys(self) -> Sequence[str]:
+        return CONSOLE_KEYS
 
-        self._enabled_check = QCheckBox("Enable voice notifications")
+    def specs(self) -> Sequence[SettingSpec]:
+        from lightfall_settings import SettingSpec
 
-        events_box = QGroupBox("Spoken events")
-        events_form = QVBoxLayout(events_box)
-        self._tools_check = QCheckBox("Tool announcements")
-        self._summary_check = QCheckBox("Turn summaries")
-        self._permission_check = QCheckBox("Permission requests")
-        self._errors_check = QCheckBox("Errors")
-        for cb in (self._tools_check, self._summary_check,
-                   self._permission_check, self._errors_check):
-            events_form.addWidget(cb)
-
-        daemon_box = QGroupBox("Voice daemon")
-        daemon_form = QFormLayout(daemon_box)
-        self._host_edit = QLineEdit()
-        self._port_spin = QSpinBox()
-        self._port_spin.setRange(1, 65535)
-        daemon_form.addRow("Host", self._host_edit)
-        daemon_form.addRow("Port", self._port_spin)
-
-        voices_box = QGroupBox("Voices")
-        voices_form = QFormLayout(voices_box)
-        self._default_voice_combo = self._voice_combo("Voice daemon's own default")
-        voices_form.addRow("Default voice", self._default_voice_combo)
-
-        agents_box = QGroupBox("Agents")
-        agents_layout = QVBoxLayout(agents_box)
-        note = QLabel(
-            "Checked agents are muted; permission requests and errors always speak. "
-            "Pick a voice per agent, or leave it on the default voice."
+        return tuple(
+            SettingSpec(key=key, type=type_, scopes={"user"}, label=label)
+            for key, type_, label in _USER_SPECS
         )
-        note.setWordWrap(True)
-        self._agents_list = QTreeWidget()
-        self._agents_list.setHeaderLabels(["Agent (checked = muted)", "Voice"])
-        self._agents_list.setRootIsDecorated(False)
-        self._agents_list.header().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents
+
+    def sections(self) -> Sequence[Section]:
+        return (
+            Section("Voice notifications", (
+                _field("voice.enabled", Toggle()),
+                _field("voice.events.tools", Toggle()),
+                _field("voice.events.summary", Toggle()),
+                _field("voice.events.permission", Toggle()),
+                _field("voice.events.errors", Toggle()),
+                _field("voice.default_voice", Custom(voice_choice_editor)),
+                Action("Test voice", run=lambda _values: _test_voice()),
+            )),
+            Section("Agents", (
+                _field("voice.agent_overrides", Custom(agent_voices_editor), description=AGENTS_NOTE),
+            )),
+            Section("Voice daemon", (
+                _field("voice.daemon_host", Text(blank_is_unset=True), label="Host", placeholder="127.0.0.1"),
+                _field("voice.daemon_port", Integer(1, 65535), label="Port", placeholder="52849"),
+            )),
+            Section("Voice input", (
+                _field("voice.input.enabled", Toggle()),
+                _field("voice.input.hotkey", Custom(hotkey_editor), placeholder="F9"),
+                _field("voice.input.model", Choice([(m, m) for m in MODELS])),
+                _field("voice.input.language", Choice([(v, label) for label, v in LANGUAGES])),
+                _field("voice.input.silence_s", Number(0.3, 5.0, 0.1), unit="s", placeholder="1.0"),
+            )),
+            Section("Voice input on this machine", (
+                _field("voice.input.device", Choice([(v, label) for label, v in DEVICES]), label="Device"),
+                _field("voice.input.input_device", Choice(_input_devices), label="Input device"),
+                _field(
+                    "voice.input.model_dir",
+                    Path(mode="dir"),
+                    label="Model directory",
+                    placeholder="Empty: the Hugging Face cache",
+                ),
+                _field(
+                    "voice.input.python",
+                    Path(mode="file"),
+                    label="Python interpreter",
+                    placeholder="Empty: Lightfall's own interpreter",
+                ),
+            )),
         )
-        agents_layout.addWidget(note)
-        agents_layout.addWidget(self._agents_list)
 
-        self._test_button = QPushButton("Test voice")
-        self._test_button.clicked.connect(self._on_test_clicked)
+    def validate_values(self, values: FormValues) -> list[str]:
+        return []  # a blank daemon host is Not set, i.e. the default 127.0.0.1
 
-        layout.addWidget(self._enabled_check)
-        layout.addWidget(events_box)
-        layout.addWidget(voices_box)
-        layout.addWidget(agents_box)
-        layout.addWidget(daemon_box)
-        layout.addWidget(self._test_button)
-        layout.addWidget(self._build_input_box())
-        layout.addStretch()
+    # -- save ------------------------------------------------------------------
 
-        # Plugin outlives the dialog: drop widget refs on destruction
-        # (same pattern as lightfall-vibe's settings plugin).
-        widget.destroyed.connect(self._on_widget_destroyed)
-        self._widget = widget
-        return widget
+    def after_save(self, scope: str, changed: Mapping[str, Any]) -> None:
+        """Re-apply the saved settings to the running service and controller.
 
-    def _build_input_box(self) -> QGroupBox:
-        box = QGroupBox("Voice input")
-        form = QFormLayout(box)
-
-        self._input_enabled_check = QCheckBox("Enable voice input")
-        self._model_dir_edit = QLineEdit()
-        self._model_dir_edit.setPlaceholderText("Empty: the Hugging Face cache")
-        self._python_edit = QLineEdit()
-        self._python_edit.setPlaceholderText("Empty: Lightfall's own interpreter")
-        self._hotkey_edit = QKeySequenceEdit()
-        self._model_combo = QComboBox()
-        for model in MODELS:
-            self._model_combo.addItem(model, model)
-        self._device_combo = QComboBox()
-        for label, value in DEVICES:
-            self._device_combo.addItem(label, value)
-        self._language_combo = QComboBox()
-        for label, value in LANGUAGES:
-            self._language_combo.addItem(label, value)
-        self._input_device_combo = QComboBox()
-        self._input_device_combo.addItem("System default", "")
-        for device in QMediaDevices.audioInputs():
-            self._input_device_combo.addItem(device.description(), bytes(device.id()).decode())
-        self._silence_spin = QDoubleSpinBox()
-        self._silence_spin.setRange(0.3, 5.0)
-        self._silence_spin.setSingleStep(0.1)
-        self._silence_spin.setDecimals(1)
-        self._silence_spin.setSuffix(" s")
-
-        form.addRow(self._input_enabled_check)
-        form.addRow("Model directory", self._with_browse(self._model_dir_edit, directory=True))
-        form.addRow("Python interpreter", self._with_browse(self._python_edit, directory=False))
-        form.addRow("Hotkey", self._hotkey_edit)
-        form.addRow("Model", self._model_combo)
-        form.addRow("Device", self._device_combo)
-        form.addRow("Language", self._language_combo)
-        form.addRow("Input device", self._input_device_combo)
-        form.addRow("Silence", self._silence_spin)
-        return box
-
-    @staticmethod
-    def _with_browse(edit: QLineEdit, *, directory: bool) -> QWidget:
-        row = QWidget()
-        h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        button = QPushButton("Browse…")
-
-        def browse() -> None:
-            if directory:
-                chosen = QFileDialog.getExistingDirectory(row, "Model directory", edit.text())
-            else:
-                chosen, _ = QFileDialog.getOpenFileName(row, "Python interpreter", edit.text())
-            if chosen:
-                edit.setText(chosen)
-
-        button.clicked.connect(browse)
-        h.addWidget(edit, 1)
-        h.addWidget(button)
-        return row
-
-    @staticmethod
-    def _select(combo: QComboBox, value: str) -> None:
-        """Select the entry carrying ``value``; keep an unlisted saved value as an entry."""
-        index = combo.findData(value)
-        if index < 0:
-            combo.addItem(value, value)  # e.g. an unplugged microphone's id
-            index = combo.count() - 1
-        combo.setCurrentIndex(index)
-
-    @staticmethod
-    def _known_agent_names() -> set[str]:
-        """Agent specs plus live sessions: every name a session tab can carry."""
-        names: set[str] = {service_module.PRIMARY_AGENT}
-        try:
-            from lightfall.agents.registry import AgentSpecRegistry
-
-            names.update(spec.name for spec in AgentSpecRegistry.get_instance().specs())
-        except Exception:
-            logger.debug("lightfall-voice: agent registry unavailable for the mute list")
-        service = service_module.get_service()
-        if service is not None:
-            names.update(service.attached_agent_names())
-        return names
-
-    @staticmethod
-    def _voice_combo(default_label: str) -> QComboBox:
-        """Editable voice picker: ``default_label`` (data "") then the known
-        Kokoro voices; any other Kokoro id can be typed."""
-        combo = QComboBox()
-        combo.setEditable(True)
-        combo.addItem(default_label, "")
-        for voice_id, label in KOKORO_VOICES:
-            combo.addItem(f"{voice_id} — {label}", voice_id)
-        return combo
-
-    @staticmethod
-    def _combo_voice(combo: QComboBox) -> str:
-        """The chosen voice id ("" = default); a typed id is taken verbatim."""
-        text = combo.currentText().strip()
-        index = combo.findText(text)
-        if index >= 0:
-            return combo.itemData(index) or ""
-        return text.split()[0] if text else ""
-
-    @staticmethod
-    def _select_voice(combo: QComboBox, voice: str | None) -> None:
-        index = combo.findData(voice or "")
-        if index < 0:
-            combo.addItem(voice, voice)  # an id the catalogue doesn't list
-            index = combo.count() - 1
-        combo.setCurrentIndex(index)
-
-    def _agent_rows(self):
-        """(item, voice combo) for each row of the Agents list."""
-        for row in range(self._agents_list.topLevelItemCount()):
-            item = self._agents_list.topLevelItem(row)
-            yield item, self._agents_list.itemWidget(item, 1)
-
-    def _populate_agents(self, overrides: dict[str, AgentOverride]) -> None:
-        self._agents_list.clear()
-        for name in sorted(self._known_agent_names() | set(overrides)):
-            item = QTreeWidgetItem([name])
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            override = overrides.get(name)
-            muted = override.muted if override is not None else muted_by_default(name)
-            item.setCheckState(0, Qt.CheckState.Checked if muted else Qt.CheckState.Unchecked)
-            self._agents_list.addTopLevelItem(item)
-            combo = self._voice_combo("Default voice")
-            self._select_voice(combo, override.voice if override is not None else None)
-            self._agents_list.setItemWidget(item, 1, combo)
-
-    def _agent_overrides(self, existing: dict[str, AgentOverride]) -> dict[str, AgentOverride]:
-        """Overrides from the list's check states and voice pickers."""
-        overrides = dict(existing)
-        for item, combo in self._agent_rows():
-            name = item.text(0)
-            overrides = with_agent_voice(overrides, name, self._combo_voice(combo))
-            muted = item.checkState(0) == Qt.CheckState.Checked
-            overrides = with_agent_muted(overrides, name, muted)
-        return overrides
-
-    def _on_widget_destroyed(self) -> None:
-        self._widget = None
-
-    def _on_test_clicked(self) -> None:
-        service = service_module.get_service()
-        if service is not None:
-            service.speak_test()
-
-    # -- load/save/validate -----------------------------------------------------
-
-    def load_settings(self) -> None:
-        s = VoiceSettings.from_preferences(self._preferences())
-        self._enabled_check.setChecked(s.enabled)
-        self._tools_check.setChecked(s.tools)
-        self._summary_check.setChecked(s.summary)
-        self._permission_check.setChecked(s.permission)
-        self._errors_check.setChecked(s.errors)
-        self._host_edit.setText(s.daemon_host)
-        self._port_spin.setValue(s.daemon_port)
-        self._select_voice(self._default_voice_combo, s.default_voice)
-        self._populate_agents(s.agent_overrides)
-
-        i = VoiceInputSettings.from_preferences(self._preferences())
-        self._input_enabled_check.setChecked(i.enabled)
-        self._model_dir_edit.setText(i.model_dir)
-        self._python_edit.setText(i.python)
-        self._hotkey_edit.setKeySequence(QKeySequence(i.hotkey))
-        self._select(self._model_combo, i.model)
-        self._select(self._device_combo, i.device)
-        self._select(self._language_combo, i.language)
-        self._select(self._input_device_combo, i.input_device)
-        self._silence_spin.setValue(i.silence_s)
-
-    def validate(self) -> list[str]:
-        errors = []
-        if self._widget is not None and not self._host_edit.text().strip():
-            errors.append("Voice daemon host must not be empty")
-        return errors
-
-    def save_settings(self) -> None:
+        Both settings objects are rebuilt from the resolved store, so running this
+        once per saved scope of one Apply gives the same result each time.
+        """
+        if not any(key.startswith("voice.") for key in changed):
+            return
         prefs = self._preferences()
-        existing = VoiceSettings.from_preferences(prefs)
-        s = VoiceSettings(
-            enabled=self._enabled_check.isChecked(),
-            tools=self._tools_check.isChecked(),
-            summary=self._summary_check.isChecked(),
-            permission=self._permission_check.isChecked(),
-            errors=self._errors_check.isChecked(),
-            daemon_host=self._host_edit.text().strip(),
-            daemon_port=self._port_spin.value(),
-            default_voice=self._combo_voice(self._default_voice_combo),
-            agent_overrides=self._agent_overrides(existing.agent_overrides),
-        )
-        s.to_preferences(prefs)
         service = service_module.get_service()
         if service is not None:
-            service.apply_settings(s)
-
-        old_input = VoiceInputSettings.from_preferences(prefs)
-        hotkey = self._hotkey_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
-        new_input = VoiceInputSettings(
-            enabled=self._input_enabled_check.isChecked(),
-            model_dir=self._model_dir_edit.text().strip(),
-            hotkey=hotkey or old_input.hotkey,
-            model=self._model_combo.currentData(),
-            device=self._device_combo.currentData(),
-            input_device=self._input_device_combo.currentData() or "",
-            silence_s=round(self._silence_spin.value(), 1),
-            language=self._language_combo.currentData() or "",
-            python=self._python_edit.text().strip(),
-        )
-        new_input.save(prefs)
+            service.apply_settings(VoiceSettings.from_preferences(prefs))
         controller = get_controller()
         if controller is not None:
-            controller.apply_settings(new_input)
+            controller.apply_settings(VoiceInputSettings.from_preferences(prefs))

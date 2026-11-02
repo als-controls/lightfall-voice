@@ -19,7 +19,7 @@ button in the Assistant panel's title bar, or any agent under **Preferences →
 Voice Notifications → Agents**; a muted agent's permission requests and
 errors still speak.
 
-Voices: **Preferences → Voice Notifications → Voices → Default voice** sets
+Voices: **Preferences → Voice Notifications → Voice notifications → Default voice** sets
 the voice for every agent (default `af_heart`, the voice ascribe-link uses);
 the Agents list picks a voice per agent. Both combos are editable, so any
 Kokoro voice id can be typed. An empty default leaves the choice to the
@@ -51,7 +51,9 @@ Install the service dependencies into the interpreter that will run it:
 The base install never imports faster-whisper. If the service dependencies live in a
 separate environment, point `Python interpreter` at it.
 
-Settings (Preferences -> Plugins -> Voice Notifications -> Voice input; keys `voice.input.*`):
+Settings (Preferences -> Plugins -> Voice Notifications; keys `voice.input.*`). Device, Input device,
+Model directory and Python interpreter are set at This console ("Voice input on this machine");
+the rest are per user ("Voice input"):
 
 | Setting | Key | Default |
 |---|---|---|
@@ -84,6 +86,11 @@ While you dictate, spoken notifications are held and released afterwards.
 `voice.daemon_host`, `voice.daemon_port`, `voice.default_voice`, `voice.input.*`
 (above), `voice.agent_overrides` (`{agent_name: {"muted": bool, "voice": "af_sky"}}`,
 set from the Agents list).
+
+`voice.daemon_host`, `voice.daemon_port` and the machine's voice input keys
+(`device`, `input_device`, `model_dir`, `python`) belong to this console and are
+set at This console; every other key is a per-user setting. Only edited keys
+are saved; a blank daemon host means the default `127.0.0.1`.
 
 ## Tests
 
