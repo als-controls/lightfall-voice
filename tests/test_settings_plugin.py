@@ -446,3 +446,22 @@ def test_untouched_page_writes_nothing(qtbot, voice_env):
     controller.apply_settings.assert_not_called()
     service.speak_test.assert_not_called()
     assert voice_env.file_dialogs == []
+
+
+def test_agent_voices_read_only_survives_reload(qtbot, voice_prefs):
+    """refresh_from_store calls set_value without set_read_only: a locked list stays locked."""
+    from lightfall_voice.settings_editors import AgentVoicesEditor
+
+    editor = AgentVoicesEditor()
+    qtbot.addWidget(editor)
+    editor.set_read_only(True)
+    editor.set_value({"observer": {"muted": True, "voice": "af_sky"}, "lightfall": {"muted": True, "voice": None}})
+    rows = editor.items()
+    assert {"observer", "lightfall"} <= set(rows)
+    for item, combo in rows.values():
+        assert not item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+        assert not combo.isEnabled()
+    editor.set_read_only(False)
+    for item, combo in editor.items().values():
+        assert item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+        assert combo.isEnabled()

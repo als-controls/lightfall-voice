@@ -303,7 +303,9 @@ class AgentVoicesEditor(FieldEditor):
             self._tree.clear()
             for name in sorted(known_agent_names() | set(self._stored)):
                 item = QTreeWidgetItem([name])
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                checkable = Qt.ItemFlag.ItemIsUserCheckable
+                # A reload (refresh_from_store) must not unlock a read-only list.
+                item.setFlags(item.flags() & ~checkable if self._read_only else item.flags() | checkable)
                 override = self._stored.get(name)
                 muted = override.muted if override is not None else muted_by_default(name)
                 item.setCheckState(0, Qt.CheckState.Checked if muted else Qt.CheckState.Unchecked)

@@ -109,3 +109,60 @@ def test_no_session_disables_the_button(qtbot):
     _, panel, mute, _ = make(qtbot)
     mute.install()
     assert not mute.action.isEnabled()
+
+
+def test_mute_click_saves_only_the_agent_overrides(qtbot):
+    from lightfall_voice.mute_action import save_agent_overrides
+
+    class Prefs:
+        def __init__(self):
+            self.calls = []
+
+        def set(self, key, value, **kwargs):
+            self.calls.append((key, value, kwargs))
+
+    prefs = Prefs()
+    service = VoiceService(
+        VoiceSettings(agent_overrides={"observer": AgentOverride(muted=False, voice="af_sky")}),
+        client=MagicMock(), widget_scanner=lambda: [],
+    )
+    panel = FakePanel()
+    mute = SessionMuteAction(service, save=save_agent_overrides(lambda: prefs), panel_lookup=lambda: panel)
+    mute.install()
+    panel.current = _widget("lightfall")
+    panel.current_session_changed.emit()
+    mute.action.trigger()
+    assert prefs.calls == [(
+        "voice.agent_overrides",
+        {"observer": {"muted": False, "voice": "af_sky"}, "lightfall": {"muted": True, "voice": None}},
+        {},
+    )]
+    assert service.is_agent_muted("lightfall")  # the service has the new overrides
+
+
+def test_settings_page_mute_button_saves_only_the_agent_overrides(qtbot, voice_prefs, monkeypatch):
+    from unittest.mock import patch
+
+    from lightfall_voice import service as service_module
+    from lightfall_voice import settings as settings_module
+
+    panel = FakePanel()
+    monkeypatch.setattr("lightfall_voice.mute_action._default_panel_lookup", lambda: panel)
+    real_service = VoiceService(VoiceSettings(), client=MagicMock(), widget_scanner=lambda: [])
+    with (
+        patch.object(service_module, "VoiceService", return_value=real_service),
+        patch.object(settings_module.controller_module, "VoiceInputController"),
+    ):
+        real_service.start = lambda: None
+        settings_module.VoiceSettingsPlugin().on_loaded()
+    try:
+        mute = settings_module._mute_action
+        panel.current = _widget("lightfall")
+        mute.install()
+        mute.action.trigger()
+        assert voice_prefs.calls == [
+            ("voice.agent_overrides", {"lightfall": {"muted": True, "voice": None}}, None)
+        ]
+    finally:
+        service_module.set_service(None)
+        settings_module.set_controller(None)

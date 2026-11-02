@@ -32,7 +32,7 @@ from lightfall.ui.preferences.manager import PreferencesManager
 from lightfall.utils.logging import logger
 
 from lightfall_voice import service as service_module
-from lightfall_voice.mute_action import SessionMuteAction
+from lightfall_voice.mute_action import SessionMuteAction, save_agent_overrides
 from lightfall_voice.policy import VoiceSettings
 from lightfall_voice.settings_editors import agent_voices_editor, hotkey_editor, voice_choice_editor
 from lightfall_voice.stt import controller as controller_module
@@ -169,9 +169,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
         preload, so install on every AgentBus.agents_changed (idempotent)."""
         global _mute_action
         try:
-            _mute_action = SessionMuteAction(
-                service, save=lambda s: s.to_preferences(self._preferences())
-            )
+            _mute_action = SessionMuteAction(service, save=save_agent_overrides(self._preferences))
             from lightfall.agents.bus import AgentBus
 
             AgentBus.get_instance().agents_changed.connect(_mute_action.install)

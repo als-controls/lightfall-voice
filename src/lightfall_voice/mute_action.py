@@ -16,11 +16,27 @@ from PySide6.QtGui import QAction
 
 from lightfall.utils.logging import logger
 
-from lightfall_voice.policy import VoiceSettings
+from lightfall_voice.policy import _KEYS, VoiceSettings
 from lightfall_voice.stt.controller import CLAUDE_PANEL_ID, _alive, _default_window_lookup
 
 _ICON_SPEAKING = "mdi6.volume-high"
 _ICON_MUTED = "mdi6.volume-off"
+
+
+def save_agent_overrides(get_prefs: Callable[[], object]) -> Callable[[VoiceSettings], None]:
+    """A ``save`` for SessionMuteAction that writes only ``voice.agent_overrides``.
+
+    A mute click changes nothing else, so no other voice key is (re)written.
+    ``get_prefs`` is called on each save (the preferences store may be replaced).
+    """
+
+    def save(settings: VoiceSettings) -> None:
+        get_prefs().set(
+            _KEYS["agent_overrides"],
+            {name: {"muted": o.muted, "voice": o.voice} for name, o in settings.agent_overrides.items()},
+        )
+
+    return save
 
 
 def _default_panel_lookup():
