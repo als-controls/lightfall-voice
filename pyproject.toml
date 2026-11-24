@@ -9,8 +9,18 @@ readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE.md", "LEGAL.md"]
 requires-python = ">=3.11"
+authors = [{ name = "ALS Controls Team" }]
 dynamic = ["version"]
-dependencies = ["lightfall", "numpy"]
+dependencies = [
+    "lightfall",
+    "lightfall-utils>=0.3.0",
+    "lightfall-settings>=0.1.4",
+    "numpy",
+]
+
+[project.urls]
+Repository = "https://github.com/als-controls/lightfall-voice"
+Issues = "https://github.com/als-controls/lightfall-voice/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-qt"]
@@ -26,3 +36,7 @@ fallback-version = "0.0.0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lightfall_voice"]
+
+[tool.ruff.lint]
+# Match lightfall-vibe: keep the pre-0.16 ruff default rule set.
+select = ["E4", "E7", "E9", "F"]

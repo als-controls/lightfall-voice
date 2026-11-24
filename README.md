@@ -31,7 +31,9 @@ spoken late.
 
 ## Install
 
-    pip install -e .
+    pip install lightfall-voice
+
+For development, from a clone: `pip install -e ".[dev]"`.
 
 Registers via the `lightfall.plugins` entry point; the settings page appears
 under Preferences → Plugins → Voice Notifications.
@@ -45,8 +47,8 @@ on demand; the transcript is submitted as a prompt (queued while the agent is bu
 
 Install the service dependencies into the interpreter that will run it:
 
-    pip install -e ".[stt-service]"      # CPU
-    pip install -e ".[gpu]"             # CUDA 12 (cuBLAS + cuDNN wheels)
+    pip install "lightfall-voice[stt-service]"   # CPU
+    pip install "lightfall-voice[gpu]"           # CUDA 12 (cuBLAS + cuDNN wheels)
 
 The base install never imports faster-whisper. If the service dependencies live in a
 separate environment, point `Python interpreter` at it.
