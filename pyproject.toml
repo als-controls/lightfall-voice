@@ -6,6 +6,8 @@ build-backend = "hatchling.build"
 name = "lightfall-voice"
 description = "Voice notifications plugin for Lightfall via the local Kokoro voice daemon"
 readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE.md", "LEGAL.md"]
 requires-python = ">=3.11"
 dynamic = ["version"]
 dependencies = ["lightfall", "numpy"]
