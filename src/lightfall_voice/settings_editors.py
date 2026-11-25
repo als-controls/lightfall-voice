@@ -35,7 +35,7 @@ from lightfall_voice.policy import (
 )
 from lightfall_voice.voices import KOKORO_VOICES
 
-DAEMON_DEFAULT_LABEL = "Voice daemon's own default"
+DEFAULT_VOICE_LABEL = "Heart (default)"
 AGENT_DEFAULT_LABEL = "Default voice"
 AGENT_HEADERS = ("Agent (checked = muted)", "Voice")
 
@@ -53,7 +53,7 @@ def _typed_voice(text: str) -> str:
 
 
 class VoiceChoiceEditor(ChoiceEditor):
-    """Editable voice combo: "Not set", the daemon's own default (""), then the Kokoro voices.
+    """Editable voice combo: "Not set", "Heart (default)" (""), then the Kokoro voices.
 
     While "Not set" is current the line is empty with a muted "Not set"
     placeholder, so typing starts a fresh id. A typed id that is not listed
@@ -61,7 +61,7 @@ class VoiceChoiceEditor(ChoiceEditor):
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        options = [("", DAEMON_DEFAULT_LABEL), *_voice_options()]
+        options = [("", DEFAULT_VOICE_LABEL), *_voice_options()]
         super().__init__(EditorSpec("choice", options=options), parent)
         self._editable = True
         self._combo.setEditable(True)

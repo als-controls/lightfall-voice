@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from lightfall_voice.events import VoiceEvent
+from lightfall_voice.tts.client import OutputSettings
 from lightfall_voice.voices import DEFAULT_VOICE
 
 TTL_SECONDS = 10.0
@@ -16,10 +17,13 @@ _KEYS = {
     "summary": "voice.events.summary",
     "permission": "voice.events.permission",
     "errors": "voice.events.errors",
-    "daemon_host": "voice.daemon_host",
-    "daemon_port": "voice.daemon_port",
     "default_voice": "voice.default_voice",
     "agent_overrides": "voice.agent_overrides",
+    "speed": "voice.output.speed",
+    "quality": "voice.output.quality",
+    "model_dir": "voice.output.model_dir",
+    "output_device": "voice.output.output_device",
+    "python": "voice.output.python",
 }
 
 
@@ -36,11 +40,14 @@ class VoiceSettings:
     summary: bool = True
     permission: bool = True
     errors: bool = True
-    daemon_host: str = "127.0.0.1"
-    daemon_port: int = 52849
-    # Voice for agents without their own; "" leaves it to the daemon's config.
+    # Voice for agents without their own; "" means af_heart.
     default_voice: str = DEFAULT_VOICE
     agent_overrides: dict[str, AgentOverride] = field(default_factory=dict)
+    speed: float = 1.0
+    quality: str = "fp16"
+    model_dir: str = ""
+    output_device: str = ""
+    python: str = ""
 
     @classmethod
     def from_preferences(cls, prefs) -> "VoiceSettings":
@@ -51,26 +58,28 @@ class VoiceSettings:
             )
             for name, o in raw_overrides.items()
         }
+        raw_speed = prefs.get(_KEYS["speed"], 1.0)
         return cls(
             enabled=bool(prefs.get(_KEYS["enabled"], True)),
             tools=bool(prefs.get(_KEYS["tools"], True)),
             summary=bool(prefs.get(_KEYS["summary"], True)),
             permission=bool(prefs.get(_KEYS["permission"], True)),
             errors=bool(prefs.get(_KEYS["errors"], True)),
-            daemon_host=str(prefs.get(_KEYS["daemon_host"], "127.0.0.1")),
-            daemon_port=int(prefs.get(_KEYS["daemon_port"], 52849)),
-            default_voice=str(prefs.get(_KEYS["default_voice"], DEFAULT_VOICE) or ""),
+            default_voice=str(prefs.get(_KEYS["default_voice"], DEFAULT_VOICE) or DEFAULT_VOICE),
             agent_overrides=overrides,
+            speed=float(1.0 if raw_speed is None else raw_speed),
+            quality=str(prefs.get(_KEYS["quality"], "fp16") or "fp16"),
+            model_dir=str(prefs.get(_KEYS["model_dir"], "") or ""),
+            output_device=str(prefs.get(_KEYS["output_device"], "") or ""),
+            python=str(prefs.get(_KEYS["python"], "") or ""),
         )
 
-    def to_preferences(self, prefs) -> None:
+    def save(self, prefs) -> None:
         prefs.set(_KEYS["enabled"], self.enabled)
         prefs.set(_KEYS["tools"], self.tools)
         prefs.set(_KEYS["summary"], self.summary)
         prefs.set(_KEYS["permission"], self.permission)
         prefs.set(_KEYS["errors"], self.errors)
-        prefs.set(_KEYS["daemon_host"], self.daemon_host)
-        prefs.set(_KEYS["daemon_port"], self.daemon_port)
         prefs.set(_KEYS["default_voice"], self.default_voice)
         prefs.set(
             _KEYS["agent_overrides"],
@@ -78,6 +87,24 @@ class VoiceSettings:
                 name: {"muted": o.muted, "voice": o.voice}
                 for name, o in self.agent_overrides.items()
             },
+        )
+        prefs.set(_KEYS["speed"], self.speed)
+        prefs.set(_KEYS["quality"], self.quality)
+        prefs.set(_KEYS["model_dir"], self.model_dir)
+        prefs.set(_KEYS["output_device"], self.output_device)
+        prefs.set(_KEYS["python"], self.python)
+
+    def to_preferences(self, prefs) -> None:
+        self.save(prefs)
+
+    def to_output(self) -> OutputSettings:
+        return OutputSettings(
+            enabled=self.enabled,
+            speed=self.speed,
+            quality=self.quality,
+            model_dir=self.model_dir,
+            output_device=self.output_device,
+            default_voice=self.default_voice or DEFAULT_VOICE,
         )
 
 
@@ -161,5 +188,9 @@ class VoicePolicy:
                     return None
                 self._last_tool_time[key] = now
 
-        voice = (override.voice if override is not None else None) or s.default_voice
-        return (event.text, voice or None)
+        voice = (
+            (override.voice if override is not None else None)
+            or s.default_voice
+            or DEFAULT_VOICE
+        )
+        return (event.text, voice)

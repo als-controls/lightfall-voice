@@ -1,14 +1,15 @@
-"""VoiceService: discovers Claude sessions, wires signals, speaks via daemon.
+"""VoiceService: discovers Claude sessions, wires signals, speaks via TtsClient.
 
 Discovery is external to lightfall core: on AgentBus.agents_changed we scan
 QApplication.allWidgets() for ClaudeAssistantWidget instances and attach to
-their .agent signals. Everything downstream (policy, phrases, daemon client)
+their .agent signals. Everything downstream (policy, phrases, TTS client)
 is injected and unit-testable without lightfall widgets.
 """
 
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import dataclass
 import threading
 import time
 from typing import Callable
@@ -18,7 +19,6 @@ from PySide6.QtCore import QObject, Signal
 from lightfall.utils.logging import logger
 
 from lightfall_voice import phrases
-from lightfall_voice.daemon_client import DaemonClient
 from lightfall_voice.events import (
     VoiceEvent,
     error_event,
@@ -32,6 +32,15 @@ from lightfall_voice.policy import (
     muted_by_default,
     with_agent_muted,
 )
+from lightfall_voice.tts.client import TtsClient
+from lightfall_voice.tts.scheduler import SpeechItem
+from lightfall_voice.voices import DEFAULT_VOICE
+
+
+@dataclass(frozen=True)
+class _RequeuedSpeech:
+    item: SpeechItem
+
 
 # Name for a session whose widget carries none. Spoken phrases omit it, so
 # the main assistant's errors and permission requests aren't name-prefixed.
@@ -68,15 +77,13 @@ class VoiceService(QObject):
     def __init__(
         self,
         settings: VoiceSettings,
-        client: DaemonClient | None = None,
+        client: TtsClient | None = None,
         widget_scanner: Callable[[], list] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__()
         self._policy = VoicePolicy(settings)
-        self._client = client or DaemonClient(
-            host=settings.daemon_host, port=settings.daemon_port
-        )
+        self._client = client if client is not None else TtsClient(settings.to_output())
         self._scan = widget_scanner or default_widget_scanner
         self._clock = clock
         # Track attached agents by id() so rescans are idempotent. Keep a
@@ -94,7 +101,7 @@ class VoiceService(QObject):
         # agent signals may be delivered off the Qt main thread.
         self._hold_lock = threading.Lock()
         self._hold_count = 0
-        self._held: list[tuple[VoiceEvent, float]] = []
+        self._held: list[tuple[VoiceEvent, float] | _RequeuedSpeech] = []
         self._draining = False
 
     # -- hold / release ----------------------------------------------------
@@ -103,6 +110,12 @@ class VoiceService(QObject):
         """Suspend speaking; events queue until the matching release(). Nests."""
         with self._hold_lock:
             self._hold_count += 1
+            first = self._hold_count == 1
+        if first:
+            interrupted = self._client.stop_all()
+            if isinstance(interrupted, SpeechItem):
+                with self._hold_lock:
+                    self._held.insert(0, _RequeuedSpeech(interrupted))
 
     def release(self) -> None:
         """Undo one hold(); at zero, speak queued events in order, dropping stale ones."""
@@ -121,8 +134,12 @@ class VoiceService(QObject):
                 if self._hold_count > 0 or not self._held:
                     self._draining = False
                     return
-                event, enqueued_at = self._held.pop(0)
+                queued = self._held.pop(0)
             try:
+                if isinstance(queued, _RequeuedSpeech):
+                    self._client.requeue(queued.item)
+                    continue
+                event, enqueued_at = queued
                 now = self._clock()
                 ttl = self._ttl_for(event)
                 if ttl is not None and now - enqueued_at > ttl:
@@ -134,6 +151,7 @@ class VoiceService(QObject):
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
+        self._client.start()
         try:
             from lightfall.agents.bus import AgentBus
 
@@ -158,7 +176,7 @@ class VoiceService(QObject):
         old_last_tool_time = self._policy._last_tool_time
         self._policy = VoicePolicy(settings)
         self._policy._last_tool_time = old_last_tool_time
-        self._client.configure(settings.daemon_host, settings.daemon_port)
+        self._client.apply_settings(settings.to_output())
         self.settings_changed.emit()
 
     @property
@@ -190,7 +208,7 @@ class VoiceService(QObject):
 
     def speak_test(self, message: str = "Voice notifications are working") -> None:
         """Speak a test message directly, bypassing policy, in the default voice."""
-        self._client.speak(message, voice=self.settings.default_voice or None)
+        self._client.speak(message, voice=self.settings.default_voice or DEFAULT_VOICE)
 
     # -- discovery ---------------------------------------------------------
 
@@ -264,7 +282,13 @@ class VoiceService(QObject):
             )
             return
         text, voice = decision
-        self._client.speak(text, voice=voice, ttl=self._ttl_for(event))
+        priority = "high" if event.priority == "high" else "normal"
+        self._client.speak(
+            text,
+            voice=voice,
+            ttl=self._ttl_for(event),
+            priority=priority,
+        )
 
     def _dispatch(self, event: VoiceEvent) -> None:
         now = self._clock()

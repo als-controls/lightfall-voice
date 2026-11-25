@@ -1,5 +1,5 @@
-"""Normalized voice events. Priority follows daemon semantics:
-high = non-interruptible (permission, error); low = interruptible chatter."""
+"""Normalized voice events: high = non-interruptible (permission, error);
+low = interruptible chatter."""
 
 from __future__ import annotations
 

@@ -1,8 +1,7 @@
 """Professional spoken-phrase set. Pure functions, no state.
 
 Copy rules: neutral tone; permission phrases contain "permission" and error
-phrases contain "attention" -- the daemon assigns HIGH (non-interruptible)
-priority based on those words.
+phrases contain "attention".
 """
 
 from __future__ import annotations

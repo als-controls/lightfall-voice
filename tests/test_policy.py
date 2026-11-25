@@ -55,9 +55,9 @@ def test_default_voice_applies_to_agents_without_their_own():
     assert p.decide(summary_event("observer", "Done", 0.0), now=0.0) == ("Done", "am_adam")
 
 
-def test_empty_default_voice_defers_to_the_daemon():
+def test_empty_default_voice_uses_af_heart():
     p = make_policy(default_voice="")
-    assert p.decide(summary_event("lightfall", "Done", 0.0), now=0.0) == ("Done", None)
+    assert p.decide(summary_event("lightfall", "Done", 0.0), now=0.0) == ("Done", "af_heart")
 
 
 def test_with_agent_voice_keeps_mute_and_drops_redundant_entries():
@@ -114,20 +114,66 @@ def test_tool_rate_limit_per_agent_and_tool():
     assert p.decide(tool_event("lightfall", "Read", "Reading c", 4.0), now=4.0) is not None
 
 
-def test_settings_preferences_roundtrip():
-    class FakePrefs:
-        def __init__(self):
-            self.data = {}
-        def get(self, key, default=None):
-            return self.data.get(key, default)
-        def set(self, key, value):
-            self.data[key] = value
+class _FakePrefs:
+    def __init__(self, initial=None):
+        self.data = dict(initial or {})
 
-    prefs = FakePrefs()
-    s = VoiceSettings(
-        enabled=False, tools=False, daemon_port=9999, default_voice="bm_george",
-        agent_overrides={"alignment": AgentOverride(muted=False, voice="af_sky")},
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+    def set(self, key, value):
+        self.data[key] = value
+
+
+def test_old_daemon_prefs_ignored():
+    prefs = _FakePrefs(
+        {
+            "voice.daemon_host": "10.0.0.1",
+            "voice.daemon_port": 9999,
+            "voice.enabled": False,
+        }
     )
-    s.to_preferences(prefs)
+    loaded = VoiceSettings.from_preferences(prefs)
+    assert loaded.enabled is False
+    assert not hasattr(loaded, "daemon_host")
+    assert not hasattr(loaded, "daemon_port")
+
+    out = _FakePrefs()
+    loaded.save(out)
+    assert "voice.daemon_host" not in out.data
+    assert "voice.daemon_port" not in out.data
+
+
+def test_settings_round_trip_output_keys():
+    from lightfall_voice.tts.client import OutputSettings
+
+    prefs = _FakePrefs()
+    s = VoiceSettings(
+        enabled=False,
+        tools=False,
+        default_voice="bm_george",
+        agent_overrides={"alignment": AgentOverride(muted=False, voice="af_sky")},
+        speed=1.25,
+        quality="int8",
+        model_dir="D:/models/kokoro",
+        output_device="speaker-1",
+        python="C:/py/python.exe",
+    )
+    s.save(prefs)
+    assert prefs.data["voice.output.speed"] == 1.25
+    assert prefs.data["voice.output.quality"] == "int8"
+    assert prefs.data["voice.output.model_dir"] == "D:/models/kokoro"
+    assert prefs.data["voice.output.output_device"] == "speaker-1"
+    assert prefs.data["voice.output.python"] == "C:/py/python.exe"
+
     loaded = VoiceSettings.from_preferences(prefs)
     assert loaded == s
+    assert loaded.to_output() == OutputSettings(
+        enabled=False,
+        speed=1.25,
+        quality="int8",
+        model_dir="D:/models/kokoro",
+        output_device="speaker-1",
+        default_voice="bm_george",
+    )
+    assert VoiceSettings(default_voice="").to_output().default_voice == "af_heart"

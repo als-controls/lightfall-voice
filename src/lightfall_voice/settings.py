@@ -2,8 +2,8 @@
 
 Owns the VoiceService and VoiceInputController lifecycles: on_loaded() (preload)
 starts them; after_save() re-applies the saved notification and voice input
-settings to them. The voice daemon address and this machine's voice input keys
-(device, microphone, model folder, interpreter) belong to this console; every
+settings to them. This machine's voice output and voice input keys (device,
+microphone, speaker, model folders, interpreters) belong to this console; every
 other ``voice.*`` key is a per-user setting.
 """
 
@@ -20,12 +20,10 @@ from lightfall.ui.preferences.form.schema import (
     Action,
     Choice,
     Custom,
-    Integer,
     Number,
     Path,
     Section,
     SettingField,
-    Text,
     Toggle,
 )
 from lightfall.ui.preferences.manager import PreferencesManager
@@ -63,10 +61,11 @@ AGENTS_NOTE = (
     "Pick a voice per agent, or leave it on the default voice."
 )
 
-# This console's keys: the daemon it talks to and its own voice input hardware and paths.
+# This console's keys: its own voice output and voice input hardware and paths.
 CONSOLE_KEYS = (
-    "voice.daemon_host",
-    "voice.daemon_port",
+    "voice.output.model_dir",
+    "voice.output.output_device",
+    "voice.output.python",
     "voice.input.model_dir",
     "voice.input.python",
     "voice.input.input_device",
@@ -137,7 +136,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
 
     @property
     def description(self) -> str:
-        return "Spoken notifications for Claude agent sessions via the local voice daemon"
+        return "Spoken notifications for Claude agent sessions via the local tts service"
 
     @property
     def category(self) -> str:
@@ -241,10 +240,6 @@ class VoiceSettingsPlugin(SettingsPlugin):
             Section("Agents", (
                 _field("voice.agent_overrides", Custom(agent_voices_editor), description=AGENTS_NOTE),
             )),
-            Section("Voice daemon", (
-                _field("voice.daemon_host", Text(blank_is_unset=True), label="Host", placeholder="127.0.0.1"),
-                _field("voice.daemon_port", Integer(1, 65535), label="Port", placeholder="52849"),
-            )),
             Section("Voice input", (
                 _field("voice.input.enabled", Toggle()),
                 _field("voice.input.hotkey", Custom(hotkey_editor), placeholder="F9"),
@@ -271,7 +266,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
         )
 
     def validate_values(self, values: FormValues) -> list[str]:
-        return []  # a blank daemon host is Not set, i.e. the default 127.0.0.1
+        return []
 
     # -- save ------------------------------------------------------------------
 

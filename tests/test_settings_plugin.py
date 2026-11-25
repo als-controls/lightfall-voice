@@ -1,8 +1,8 @@
-"""Voice page on the scope-aware form: notifications, agents and daemon.
+"""Voice page on the scope-aware form: notifications, agents and voice input.
 
 The old hand-built page (characterized in the commit before the rewrite) wrote every
 voice key unscoped on every save, even untouched. The form page writes only what the
-user edited, at the scope shown: the daemon and this machine's voice input keys at
+user edited, at the scope shown: this machine's voice output and voice input keys at
 This console, everything else at User. after_save() re-applies the saved settings to
 the running VoiceService and VoiceInputController.
 """
@@ -24,8 +24,9 @@ USER, LOCAL, BRANCH, BEAMLINE = "user:u1", "local", "branch:7.0.1.1", "beamline:
 OVERRIDES = "voice.agent_overrides"
 DEFAULT_VOICE = "voice.default_voice"
 CONSOLE_KEYS = {
-    "voice.daemon_host",
-    "voice.daemon_port",
+    "voice.output.model_dir",
+    "voice.output.output_device",
+    "voice.output.python",
     "voice.input.model_dir",
     "voice.input.python",
     "voice.input.input_device",
@@ -145,9 +146,9 @@ def test_console_keys_and_user_specs(voice_prefs):
 
     sections = page.sections()
     assert [s.title for s in sections] == [
-        "Voice notifications", "Agents", "Voice daemon", "Voice input", "Voice input on this machine"
+        "Voice notifications", "Agents", "Voice input", "Voice input on this machine"
     ]
-    notif, agents, daemon, voice_input, machine = sections
+    notif, agents, voice_input, machine = sections
     assert [(f.key, f.editor.kind) for f in section_fields(notif)] == [
         ("voice.enabled", "toggle"),
         ("voice.events.tools", "toggle"),
@@ -164,11 +165,6 @@ def test_console_keys_and_user_specs(voice_prefs):
         "Checked agents are muted; permission requests and errors always speak. "
         "Pick a voice per agent, or leave it on the default voice."
     )
-    host, port = section_fields(daemon)
-    assert (host.key, host.editor.kind, host.editor.blank_is_unset, host.placeholder) == (
-        "voice.daemon_host", "text", True, "127.0.0.1")
-    assert (port.key, port.editor.kind, port.editor.minimum, port.editor.maximum, port.placeholder) == (
-        "voice.daemon_port", "integer", 1, 65535, "52849")
     enabled, hotkey, model, language, silence = section_fields(voice_input)
     assert (enabled.key, enabled.editor.kind) == ("voice.input.enabled", "toggle")
     assert (hotkey.key, hotkey.editor.kind, hotkey.placeholder) == ("voice.input.hotkey", "custom", "F9")
@@ -191,11 +187,16 @@ def test_console_keys_and_user_specs(voice_prefs):
 
 
 def test_page_shows_user_keys_at_user_and_console_keys_at_this_console(qtbot, voice_env):
+    from lightfall.ui.preferences.form.schema import section_fields
+
     dialog = _dialog(qtbot)
     form = _form(dialog)
     assert set(form._rows) == USER_KEYS
     dialog.select_scope(LOCAL)
-    assert set(form._rows) == CONSOLE_KEYS
+    shown_console_keys = CONSOLE_KEYS & {
+        f.key for s in voice_env.page.sections() for f in section_fields(s)
+    }
+    assert set(form._rows) == shown_console_keys
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +301,7 @@ def test_voice_choice_not_set_placeholder_and_typed_id(qtbot, voice_env):
     combo = editor.findChild(QComboBox)
     line = combo.lineEdit()
     assert combo.isEditable()
-    assert combo.itemText(1) == "Voice daemon's own default"
+    assert combo.itemText(1) == "Heart (default)"
     assert combo.itemText(2) == "af_heart — Heart (American female, warm)"
 
     editor.set_value(None)
@@ -308,7 +309,7 @@ def test_voice_choice_not_set_placeholder_and_typed_id(qtbot, voice_env):
     assert editor.value() is None
     editor.set_value("")
     assert editor.value() == ""
-    assert combo.currentText() == "Voice daemon's own default"
+    assert combo.currentText() == "Heart (default)"
     editor.set_value("bf_emma")
     assert editor.value() == "bf_emma"
     assert combo.currentText() == "bf_emma — Emma (British female)"
@@ -379,14 +380,14 @@ def test_after_save_applies_to_service_and_controller(qtbot, voice_env):
     service_module.set_service(service)
     settings_module.set_controller(controller)
     prefs.layers[(USER, "voice.events.tools")] = False
-    prefs.layers[(LOCAL, "voice.daemon_port")] = 6000
+    prefs.layers[(LOCAL, "voice.output.model_dir")] = "D:/models"
     prefs.layers[(USER, "voice.input.silence_s")] = 1.5
     page.after_save(USER, {"voice.events.tools": False})
-    page.after_save(LOCAL, {"voice.daemon_port": 6000})  # same Apply, second scope: same result
+    page.after_save(LOCAL, {"voice.output.model_dir": "D:/models"})  # same Apply, second scope: same result
     assert service.apply_settings.call_count == 2
     assert controller.apply_settings.call_count == 2
     expected = VoiceSettings.from_preferences(prefs)
-    assert expected.tools is False and expected.daemon_port == 6000
+    assert expected.tools is False and expected.model_dir == "D:/models"
     for call in service.apply_settings.call_args_list:
         assert call.args[0] == expected
     expected_input = VoiceInputSettings.from_preferences(prefs)

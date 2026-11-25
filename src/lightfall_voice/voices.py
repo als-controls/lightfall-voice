@@ -1,4 +1,4 @@
-"""Kokoro voices offered in the preferences. The daemon accepts any Kokoro
+"""Kokoro voices offered in the preferences. The tts service accepts any Kokoro
 voice id; the combos are editable, so ids missing here can be typed."""
 
 from __future__ import annotations

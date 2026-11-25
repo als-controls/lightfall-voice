@@ -90,7 +90,7 @@ def test_voice_service_failure_still_starts_voice_input(voice_prefs):
     _input_prefs(voice_prefs, enabled=True)
     plugin = VoiceSettingsPlugin()
     with (
-        patch.object(service_module, "VoiceService", side_effect=RuntimeError("no daemon")),
+        patch.object(service_module, "VoiceService", side_effect=RuntimeError("tts failed")),
         patch.object(settings_module.controller_module, "VoiceInputController") as ctl_cls,
     ):
         plugin.on_loaded()
@@ -184,8 +184,6 @@ def test_voice_input_fields_save_at_their_scopes(qtbot, voice_env, monkeypatch):
     _type(dialog, "voice.input.silence_s", "1.5")
 
     dialog.select_scope(LOCAL)
-    _type(dialog, "voice.daemon_host", "  ")  # blank: Not set (the default 127.0.0.1)
-    _type(dialog, "voice.daemon_port", "6000")
     _pick(dialog, "voice.input.device", "CPU")
     monkeypatch.setattr(
         QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: "D:/models")
@@ -199,7 +197,6 @@ def test_voice_input_fields_save_at_their_scopes(qtbot, voice_env, monkeypatch):
         ("voice.input.model", "medium", USER),
         ("voice.input.language", "", USER),
         ("voice.input.silence_s", 1.5, USER),
-        ("voice.daemon_port", 6000, LOCAL),
         ("voice.input.device", "cpu", LOCAL),
         ("voice.input.model_dir", "D:/models", LOCAL),
         ("voice.input.python", "C:/py/python.exe", LOCAL),
