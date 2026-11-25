@@ -204,3 +204,37 @@ def test_settings_round_trip_output_keys():
         python="C:/py/python.exe",
     )
     assert VoiceSettings(default_voice="").to_output().default_voice == "af_heart"
+
+
+def test_drop_legacy_keys_tolerates_refusal_and_missing_remove():
+    from lightfall_voice.policy import drop_legacy_keys
+
+    class Refusing(_FakePrefs):
+        def remove(self, key):
+            raise ValueError("bound scope")
+
+    prefs = Refusing({"voice.daemon_host": "10.0.0.1"})
+    drop_legacy_keys(prefs)  # must not raise
+    assert prefs.data["voice.daemon_host"] == "10.0.0.1"
+
+    class NoRemove:
+        def get(self, key, default=None):
+            return default
+
+    drop_legacy_keys(NoRemove())  # no remove(): nothing to do
+
+
+def test_drop_legacy_keys_only_touches_present_keys():
+    from lightfall_voice.policy import drop_legacy_keys
+
+    removed = []
+
+    class Recording(_FakePrefs):
+        def remove(self, key):
+            removed.append(key)
+            super().remove(key)
+
+    prefs = Recording({"voice.daemon_port": 6000, "voice.enabled": True})
+    drop_legacy_keys(prefs)
+    assert removed == ["voice.daemon_port"]
+    assert prefs.data == {"voice.enabled": True}

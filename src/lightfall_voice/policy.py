@@ -91,10 +91,7 @@ class VoiceSettings:
         )
 
     def save(self, prefs) -> None:
-        remove = getattr(prefs, "remove", None)
-        if callable(remove):
-            for key in _LEGACY_KEYS:
-                remove(key)
+        drop_legacy_keys(prefs)
         prefs.set(_KEYS["enabled"], self.enabled)
         prefs.set(_KEYS["tools"], self.tools)
         prefs.set(_KEYS["summary"], self.summary)
@@ -127,6 +124,20 @@ class VoiceSettings:
             default_voice=self.default_voice or DEFAULT_VOICE,
             python=self.python,
         )
+
+
+def drop_legacy_keys(prefs) -> None:
+    """Remove the voice-daemon address keys left by older versions, where supported."""
+    remove = getattr(prefs, "remove", None)
+    if not callable(remove):
+        return
+    for key in _LEGACY_KEYS:
+        if prefs.get(key, None) is None:
+            continue
+        try:
+            remove(key)
+        except Exception:  # a read-only or bound scope must not break startup
+            pass
 
 
 def muted_by_default(agent_name: str) -> bool:

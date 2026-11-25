@@ -31,7 +31,7 @@ from lightfall.utils.logging import logger
 
 from lightfall_voice import service as service_module
 from lightfall_voice.mute_action import SessionMuteAction, save_agent_overrides
-from lightfall_voice.policy import VoiceSettings
+from lightfall_voice.policy import VoiceSettings, drop_legacy_keys
 from lightfall_voice.settings_editors import agent_voices_editor, hotkey_editor, voice_choice_editor
 from lightfall_voice.stt import controller as controller_module
 from lightfall_voice.stt.controller import VoiceInputController, VoiceInputSettings
@@ -168,7 +168,9 @@ class VoiceSettingsPlugin(SettingsPlugin):
     def on_loaded(self) -> None:
         service = None
         try:
-            settings = VoiceSettings.from_preferences(self._preferences())
+            prefs = self._preferences()
+            drop_legacy_keys(prefs)
+            settings = VoiceSettings.from_preferences(prefs)
             service = service_module.VoiceService(settings)
             service.start()
             service_module.set_service(service)
