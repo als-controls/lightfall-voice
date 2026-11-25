@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 from lightfall_voice.events import VoiceEvent
 from lightfall_voice.tts.client import OutputSettings
@@ -10,6 +11,8 @@ from lightfall_voice.voices import DEFAULT_VOICE
 
 TTL_SECONDS = 10.0
 TOOL_RATE_LIMIT_SECONDS = 3.0
+
+_LEGACY_KEYS = ("voice.daemon_host", "voice.daemon_port")
 
 _KEYS = {
     "enabled": "voice.enabled",
@@ -59,6 +62,19 @@ class VoiceSettings:
             for name, o in raw_overrides.items()
         }
         raw_speed = prefs.get(_KEYS["speed"], 1.0)
+        try:
+            speed = (
+                1.0
+                if raw_speed is None or isinstance(raw_speed, bool)
+                else float(raw_speed)
+            )
+        except (TypeError, ValueError):
+            speed = 1.0
+        if not math.isfinite(speed):
+            speed = 1.0
+        speed = min(2.0, max(0.5, speed))
+        raw_quality = prefs.get(_KEYS["quality"], "fp16")
+        quality = raw_quality if raw_quality in ("fp16", "int8") else "fp16"
         return cls(
             enabled=bool(prefs.get(_KEYS["enabled"], True)),
             tools=bool(prefs.get(_KEYS["tools"], True)),
@@ -67,14 +83,18 @@ class VoiceSettings:
             errors=bool(prefs.get(_KEYS["errors"], True)),
             default_voice=str(prefs.get(_KEYS["default_voice"], DEFAULT_VOICE) or DEFAULT_VOICE),
             agent_overrides=overrides,
-            speed=float(1.0 if raw_speed is None else raw_speed),
-            quality=str(prefs.get(_KEYS["quality"], "fp16") or "fp16"),
+            speed=speed,
+            quality=quality,
             model_dir=str(prefs.get(_KEYS["model_dir"], "") or ""),
             output_device=str(prefs.get(_KEYS["output_device"], "") or ""),
             python=str(prefs.get(_KEYS["python"], "") or ""),
         )
 
     def save(self, prefs) -> None:
+        remove = getattr(prefs, "remove", None)
+        if callable(remove):
+            for key in _LEGACY_KEYS:
+                remove(key)
         prefs.set(_KEYS["enabled"], self.enabled)
         prefs.set(_KEYS["tools"], self.tools)
         prefs.set(_KEYS["summary"], self.summary)
@@ -105,6 +125,7 @@ class VoiceSettings:
             model_dir=self.model_dir,
             output_device=self.output_device,
             default_voice=self.default_voice or DEFAULT_VOICE,
+            python=self.python,
         )
 
 

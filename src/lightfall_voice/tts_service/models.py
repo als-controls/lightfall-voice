@@ -10,8 +10,6 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
-import platformdirs
-
 _DEFAULT_BASE_URL = (
     "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
 )
@@ -48,6 +46,8 @@ class ModelDownloadError(RuntimeError):
 
 
 def default_cache_dir() -> Path:
+    import platformdirs
+
     return Path(platformdirs.user_cache_dir("lightfall-voice")) / "kokoro"
 
 

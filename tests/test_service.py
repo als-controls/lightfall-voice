@@ -11,15 +11,17 @@ from lightfall_voice.tts.scheduler import SpeechItem
 
 
 class FakeTtsClient:
-    def __init__(self, interrupted: SpeechItem | None = None) -> None:
+    def __init__(self, interrupted: list[SpeechItem] | None = None) -> None:
         self.spoken: list[dict] = []
         self.requeued: list[SpeechItem] = []
         self.events: list[tuple[str, object]] = []
         self.stop_all_calls = 0
-        self.interrupted = interrupted
+        self.interrupted: list[SpeechItem] = list(interrupted or [])
         self.applied: list[OutputSettings] = []
         self.started = 0
         self.stopped = 0
+        self.state = "ready"
+        self.last_error = ""
         self.on_speak = None
         self.on_stop_all = None
 
@@ -45,13 +47,13 @@ class FakeTtsClient:
         self.spoken.append(entry)
         self.events.append(("speak", entry))
 
-    def stop_all(self) -> SpeechItem | None:
+    def stop_all(self) -> list[SpeechItem]:
         if self.on_stop_all is not None:
             self.on_stop_all()
         self.stop_all_calls += 1
         self.events.append(("stop_all", None))
-        item, self.interrupted = self.interrupted, None
-        return item
+        items, self.interrupted = list(self.interrupted), []
+        return items
 
     def requeue(self, item: SpeechItem) -> None:
         self.requeued.append(item)
@@ -384,3 +386,14 @@ def test_bus_endpoint_name_resolves_agent_name(qtbot):
             "priority": "high",
         }
     ]
+
+
+def test_tts_state_and_error_properties(qtbot):
+    service, client, _ = make_service(qtbot, [])
+    assert service.tts_state == "ready"
+    assert service.tts_error == ""
+
+    client.state = "unavailable"
+    client.last_error = "Install lightfall-voice[tts-service]"
+    assert service.tts_state == "unavailable"
+    assert service.tts_error == "Install lightfall-voice[tts-service]"

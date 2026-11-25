@@ -1,7 +1,7 @@
 # CI for lightfall-voice — lint and tests.
 # Mirrors lightfall's ci.yml (minus the docs job: this project is README-only
-# by design). Tests run offscreen against PySide6; no audio hardware, voice
-# daemon or Whisper model is needed.
+# by design). Tests run offscreen against PySide6; no audio hardware or
+# downloaded speech models are needed.
 
 name: CI
 

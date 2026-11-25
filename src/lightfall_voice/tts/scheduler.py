@@ -82,13 +82,16 @@ class SpeechScheduler:
         self.current = None
         self._start_next()
 
-    def stop_all(self) -> SpeechItem | None:
+    def stop_all(self) -> list[SpeechItem]:
         interrupted = self.current
+        queued_high = list(self.high_queue)
         self.current = None
         self.high_queue.clear()
         self.pending_normal = None
+        saved: list[SpeechItem] = []
         if interrupted is not None:
             self._cancel(interrupted)
             if interrupted.priority == "high":
-                return interrupted
-        return None
+                saved.append(interrupted)
+        saved.extend(queued_high)
+        return saved

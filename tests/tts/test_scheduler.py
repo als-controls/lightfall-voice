@@ -190,28 +190,30 @@ def test_stop_all_returns_interrupted_high() -> None:
     sched.submit(n1)
 
     interrupted = sched.stop_all()
-    assert interrupted is h1
+    assert interrupted == [h1, h2]
     assert cancelled == [h1]
     assert sched.current is None
+    assert list(sched.high_queue) == []
+    assert sched.pending_normal is None
 
     sched.finished(h1)
     assert sched.current is None
     assert started == [h1]
 
 
-def test_stop_all_with_normal_returns_none() -> None:
+def test_stop_all_with_normal_returns_empty() -> None:
     started: list[SpeechItem] = []
     cancelled: list[SpeechItem] = []
     sched = SpeechScheduler(start=started.append, cancel=cancelled.append)
 
-    assert sched.stop_all() is None
+    assert sched.stop_all() == []
     assert cancelled == []
 
     n1 = _item("normal-1", "normal")
     sched.submit(n1)
 
     interrupted = sched.stop_all()
-    assert interrupted is None
+    assert interrupted == []
     assert cancelled == [n1]
     assert sched.current is None
 

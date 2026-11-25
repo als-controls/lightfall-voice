@@ -87,7 +87,7 @@ The base install never imports faster-whisper. If the service dependencies live 
 separate environment, point `Python interpreter` at it.
 
 Settings (Preferences -> Plugins -> Voice Notifications; keys `voice.input.*`). Device, Input device,
-Model directory and Python interpreter are set at This console ("Voice input on this machine");
+Model directory and Python interpreter are set at This console ("This machine");
 the rest are per user ("Voice input"):
 
 | Setting | Key | Default |

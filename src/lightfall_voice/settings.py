@@ -126,8 +126,11 @@ def _test_voice() -> str:
     service = service_module.get_service()
     if service is None:
         return "Voice service not running"
-    state = getattr(getattr(service, "_client", None), "state", "ready")
+    state = service.tts_state
     if isinstance(state, str) and state != "ready":
+        error = service.tts_error
+        if isinstance(error, str) and error:
+            return f"Voice service {state}: {error}"
         return f"Voice service {state}"
     service.speak_test()
     return "Spoken"
@@ -268,7 +271,7 @@ class VoiceSettingsPlugin(SettingsPlugin):
                 _field("voice.input.language", Choice([(v, label) for label, v in LANGUAGES])),
                 _field("voice.input.silence_s", Number(0.3, 5.0, 0.1), unit="s", placeholder="1.0"),
             )),
-            Section("Voice input on this machine", (
+            Section("This machine", (
                 _field("voice.output.output_device", Choice(_output_devices), label="Output device"),
                 _field(
                     "voice.output.model_dir",

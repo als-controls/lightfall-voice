@@ -14,9 +14,10 @@ import threading
 import time
 from typing import Callable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from lightfall.utils.logging import logger
+from lightfall_utils.threads import initialize_main_thread_invoker, invoke_in_main_thread
 
 from lightfall_voice import phrases
 from lightfall_voice.events import (
@@ -82,6 +83,7 @@ class VoiceService(QObject):
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__()
+        initialize_main_thread_invoker()
         self._policy = VoicePolicy(settings)
         self._client = client if client is not None else TtsClient(settings.to_output())
         self._scan = widget_scanner or default_widget_scanner
@@ -113,9 +115,9 @@ class VoiceService(QObject):
             first = self._hold_count == 1
         if first:
             interrupted = self._client.stop_all()
-            if isinstance(interrupted, SpeechItem):
+            if interrupted:
                 with self._hold_lock:
-                    self._held.insert(0, _RequeuedSpeech(interrupted))
+                    self._held[:0] = [_RequeuedSpeech(item) for item in interrupted]
 
     def release(self) -> None:
         """Undo one hold(); at zero, speak queued events in order, dropping stale ones."""
@@ -182,6 +184,14 @@ class VoiceService(QObject):
     @property
     def settings(self) -> VoiceSettings:
         return self._policy.settings
+
+    @property
+    def tts_state(self) -> str:
+        return getattr(self._client, "state", "ready")
+
+    @property
+    def tts_error(self) -> str:
+        return getattr(self._client, "last_error", "")
 
     def is_agent_muted(self, agent_name: str) -> bool:
         override = self.settings.agent_overrides.get(agent_name)
@@ -291,6 +301,9 @@ class VoiceService(QObject):
         )
 
     def _dispatch(self, event: VoiceEvent) -> None:
+        if QThread.currentThread() is not self.thread():
+            invoke_in_main_thread(self._dispatch, event)
+            return
         now = self._clock()
         with self._hold_lock:
             if self._hold_count > 0 or self._draining:

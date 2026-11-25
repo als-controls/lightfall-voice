@@ -23,9 +23,9 @@ Repository = "https://github.com/als-controls/lightfall-voice"
 Issues = "https://github.com/als-controls/lightfall-voice/issues"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-qt"]
+dev = ["pytest", "pytest-qt", "nats-server-bin>=2.14"]
 stt-service = ["faster-whisper>=1.1", "numpy"]
-tts-service = ["kokoro-onnx>=0.4.7", "numpy", "platformdirs>=4"]
+tts-service = ["kokoro-onnx>=0.4.7", "numpy", "onnxruntime>=1.20.1", "platformdirs>=4"]
 voice = ["lightfall-voice[tts-service,stt-service]"]
 gpu = ["lightfall-voice[stt-service]", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"]
 

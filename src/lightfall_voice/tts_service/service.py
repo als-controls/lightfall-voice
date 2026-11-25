@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 NAME = "tts"
 CONTRACT = "1.0"
+INSTALL_HINT = "Install lightfall-voice[tts-service]"
 KIND = "audio"
 CHUNK_SAMPLES = 4800
 CHUNK_BYTES = CHUNK_SAMPLES * 2
@@ -36,6 +37,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "lang": "en-us",
 }
 _RELOAD_KEYS = ("model_dir", "quality")
+_MISSING_MODULES = frozenset(
+    {"kokoro_onnx", "onnxruntime", "espeakng_loader", "phonemizer", "platformdirs"}
+)
 INITIAL_LOAD_DELAY_S = 2.0
 
 
@@ -166,6 +170,14 @@ def make_host(
                         warm_up(conf["lang"])
                     except Exception:
                         log.warning("tts warm-up failed", exc_info=True)
+            except ModuleNotFoundError as e:
+                if (e.name or "").split(".")[0] in _MISSING_MODULES:
+                    err = INSTALL_HINT
+                else:
+                    err = f"{type(e).__name__}: {e}"
+                log.error("tts model load failed: %s", err)
+                post("error", summary("error", err, model=quality), gen)
+                return
             except Exception as e:
                 log.exception("tts model load failed")
                 err = str(e) or type(e).__name__

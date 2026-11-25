@@ -124,6 +124,9 @@ class _FakePrefs:
     def set(self, key, value):
         self.data[key] = value
 
+    def remove(self, key):
+        self.data.pop(key, None)
+
 
 def test_old_daemon_prefs_ignored():
     prefs = _FakePrefs(
@@ -138,10 +141,33 @@ def test_old_daemon_prefs_ignored():
     assert not hasattr(loaded, "daemon_host")
     assert not hasattr(loaded, "daemon_port")
 
+    loaded.save(prefs)
+    assert "voice.daemon_host" not in prefs.data
+    assert "voice.daemon_port" not in prefs.data
+
     out = _FakePrefs()
     loaded.save(out)
     assert "voice.daemon_host" not in out.data
     assert "voice.daemon_port" not in out.data
+
+
+def test_from_preferences_clamps_speed_and_validates_quality():
+    for bad_speed in ("not-a-number", "", object(), float("nan"), float("inf"), True):
+        s = VoiceSettings.from_preferences(_FakePrefs({"voice.output.speed": bad_speed}))
+        assert s.speed == 1.0
+
+    assert VoiceSettings.from_preferences(_FakePrefs({"voice.output.speed": 0.1})).speed == 0.5
+    assert VoiceSettings.from_preferences(_FakePrefs({"voice.output.speed": -2.0})).speed == 0.5
+    assert VoiceSettings.from_preferences(_FakePrefs({"voice.output.speed": 3.5})).speed == 2.0
+    assert VoiceSettings.from_preferences(_FakePrefs({"voice.output.speed": "9.0"})).speed == 2.0
+    assert VoiceSettings.from_preferences(_FakePrefs({"voice.output.speed": "1.5"})).speed == 1.5
+
+    for bad_quality in ("fp32", "", None, 123):
+        s = VoiceSettings.from_preferences(_FakePrefs({"voice.output.quality": bad_quality}))
+        assert s.quality == "fp16"
+
+    assert VoiceSettings.from_preferences(_FakePrefs({"voice.output.quality": "int8"})).quality == "int8"
+    assert VoiceSettings.from_preferences(_FakePrefs({"voice.output.quality": "fp16"})).quality == "fp16"
 
 
 def test_settings_round_trip_output_keys():
@@ -175,5 +201,6 @@ def test_settings_round_trip_output_keys():
         model_dir="D:/models/kokoro",
         output_device="speaker-1",
         default_voice="bm_george",
+        python="C:/py/python.exe",
     )
     assert VoiceSettings(default_voice="").to_output().default_voice == "af_heart"

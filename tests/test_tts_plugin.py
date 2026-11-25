@@ -43,6 +43,18 @@ def test_manifest_has_tts_entry():
 def test_plugin_imports_without_kokoro():
     code = (
         "import sys; sys.modules['kokoro_onnx'] = None; sys.modules['onnxruntime'] = None; "
-        "import lightfall_voice.tts_plugin, lightfall_voice.tts_service.models, lightfall_voice.manifest"
+        "sys.modules['platformdirs'] = None; "
+        "import lightfall_voice.tts_plugin, lightfall_voice.tts_service.models, "
+        "lightfall_voice.tts_service.service, lightfall_voice.manifest"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_tts_service_extra_includes_onnxruntime():
+    from pathlib import Path
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    tts_extra = data["project"]["optional-dependencies"]["tts-service"]
+    assert "onnxruntime>=1.20.1" in tts_extra

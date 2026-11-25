@@ -40,6 +40,7 @@ class OutputSettings:
     model_dir: str = ""
     output_device: str = ""
     default_voice: str = DEFAULT_VOICE
+    python: str = ""
 
     def service_config(self) -> dict[str, Any]:
         """The ``config.set`` payload for the ``tts`` service."""
@@ -102,6 +103,7 @@ class TtsClient(QObject):
         self._client: Any = None
         self._client_conns: list[tuple[Any, Callable]] = []
         self._state: State = "unavailable"
+        self._last_error: str = ""
         self._gen = 0
         self._sid: str | None = None
         self._active_item: SpeechItem | None = None
@@ -115,6 +117,10 @@ class TtsClient(QObject):
     @property
     def state(self) -> State:
         return self._state
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
 
     @property
     def settings(self) -> OutputSettings:
@@ -147,6 +153,7 @@ class TtsClient(QObject):
         ):
             self._disconnect(sig, slot)
         self._set_client(None)
+        self._last_error = ""
         self._set_state("unavailable")
 
     def speak(
@@ -181,8 +188,8 @@ class TtsClient(QObject):
     def _on_own_thread(self) -> bool:
         return QThread.currentThread() is self.thread()
 
-    def stop_all(self) -> SpeechItem | None:
-        """Stop playback, clear queued speech and return any interrupted high-priority item.
+    def stop_all(self) -> list[SpeechItem]:
+        """Stop playback, clear queued speech and return any high-priority items.
 
         Main thread only (it returns a value); VoiceService.hold() is called from the UI.
         """
@@ -227,7 +234,13 @@ class TtsClient(QObject):
             if self._client is not None and self._client is before:
                 self._push_config()
         elif settings.enabled:
-            if settings.service_config() != old.service_config():
+            if settings.python != old.python and callable(getattr(self._mgr(), "restart", None)):
+                self._reset_playback(cancel=True)
+                try:
+                    self._mgr().restart(SERVICE)
+                except KeyError:
+                    logger.warning("lightfall-voice: the tts service is not registered")
+            elif settings.service_config() != old.service_config():
                 self._push_config()
         if interrupted is not None and settings.enabled:
             self._scheduler.finished(interrupted)
@@ -310,27 +323,27 @@ class TtsClient(QObject):
         if error:
             logger.warning("lightfall-voice: tts config.set refused: {}", error)
 
-    def _service_status(self) -> State:
+    def _service_status(self) -> tuple[State, str]:
         if not self._settings.enabled:
-            return "unavailable"
+            return "unavailable", ""
         client = self._client
         if client is None:
             for status in self._statuses():
                 if status.get("name") == SERVICE and status.get("health") == "down":
-                    return "unavailable"
-            return "loading"
+                    return "unavailable", str(status.get("last_error") or "")
+            return "loading", ""
         health = client.health
         if health in _UNAVAILABLE_HEALTH:
-            return "unavailable"
-        if health != "up":
-            return "loading"
+            return "unavailable", str(client.last_error or "")
+        if health not in ("up", "degraded"):
+            return "loading", ""
         summary = (client.info or {}).get("summary") or {}
         status = summary.get("status") if isinstance(summary, dict) else None
         if status == "ready":
-            return "ready"
+            return "ready", ""
         if status == "error":
-            return "unavailable"
-        return "loading"
+            return "unavailable", str(summary.get("error") or client.last_error or "")
+        return "loading", ""
 
     def _statuses(self) -> list[dict]:
         statuses = getattr(self._mgr(), "statuses", None)
@@ -347,17 +360,21 @@ class TtsClient(QObject):
             self.state_changed.emit(state)
 
     def _refresh(self) -> None:
-        self._set_state(self._service_status())
+        status, error = self._service_status()
+        self._last_error = error
+        self._set_state(status)
 
     def _on_service_changed(self, *_args) -> None:
-        status = self._service_status()
+        status, error = self._service_status()
         if status == "unavailable" and self._active_item is not None:
             self._reset_playback(cancel=False)
+        self._last_error = error
         self._set_state(status)
 
     def _on_reset(self, *_args) -> None:
         """``session_reset`` / ``restarted``: stop player, clear scheduler, set loading."""
         self._reset_playback(cancel=False)
+        self._last_error = ""
         self._set_state("loading")
         self._push_config()
 
@@ -448,6 +465,9 @@ class TtsClient(QObject):
         rate = int(reply.get("rate") or DEFAULT_RATE)
         channels = int(reply.get("channels") or DEFAULT_CHANNELS)
         self._sid = sid
+        if early_error:
+            self._finish_failed_item(cancel_remote=True)
+            return
         self._player.begin(sid, rate, channels)
         if self._sid != sid or self._active_item is not item:
             return
@@ -455,8 +475,6 @@ class TtsClient(QObject):
             if self._sid != sid or self._active_item is not item:
                 return
             self._player.feed(sid, chunk_data, final)
-        if early_error and self._sid == sid and self._active_item is item:
-            self._finish_failed_item(cancel_remote=False)
 
     def _cancel_item(self, _item: SpeechItem) -> None:
         self._gen += 1
@@ -498,10 +516,16 @@ class TtsClient(QObject):
 
     def _on_stream_chunk(self, sid: str, seq: int, data: object, final: bool) -> None:
         if self._active_item is not None and self._sid is None:
+            if sid in self._early_errors:
+                return
             buf = self._early_chunks.get(sid)
             if buf is None:
-                buf = deque(maxlen=MAX_EARLY_CHUNKS)
+                buf = deque()
                 self._early_chunks[sid] = buf
+            if len(buf) >= MAX_EARLY_CHUNKS:
+                logger.warning("lightfall-voice: early chunk buffer overflow for {}", sid)
+                self._early_errors.add(sid)
+                return
             buf.append((int(seq), bytes(data), bool(final)))
             return
         if sid != self._sid or self._sid is None or self._player is None:

@@ -233,7 +233,7 @@ def test_console_keys_and_user_specs(voice_prefs):
         "Agents",
         "Voice output",
         "Voice input",
-        "Voice input on this machine",
+        "This machine",
     ]
     notif, agents, voice_output, voice_input, machine = sections
     assert [(f.key, f.editor.kind) for f in section_fields(notif)] == [
@@ -601,14 +601,32 @@ def test_test_voice_action(qtbot, voice_env):
     item.button.click()
     qtbot.waitUntil(lambda: item.status.text() == "Voice service not running", timeout=5000)
 
-    service = MagicMock()
-    service._client.state = "loading"
+    service = MagicMock(spec=["tts_state", "tts_error", "speak_test"])
+    service.tts_state = "loading"
+    service.tts_error = ""
     service_module.set_service(service)
     item.button.click()
     qtbot.waitUntil(lambda: item.status.text() == "Voice service loading", timeout=5000)
     service.speak_test.assert_not_called()
 
-    service._client.state = "ready"
+    service.tts_state = "unavailable"
+    service.tts_error = ""
+    item.button.click()
+    qtbot.waitUntil(lambda: item.status.text() == "Voice service unavailable", timeout=5000)
+    service.speak_test.assert_not_called()
+
+    service.tts_state = "unavailable"
+    service.tts_error = "Install lightfall-voice[tts-service]"
+    item.button.click()
+    qtbot.waitUntil(
+        lambda: item.status.text()
+        == "Voice service unavailable: Install lightfall-voice[tts-service]",
+        timeout=5000,
+    )
+    service.speak_test.assert_not_called()
+
+    service.tts_state = "ready"
+    service.tts_error = ""
     item.button.click()
     qtbot.waitUntil(lambda: item.status.text() == "Spoken", timeout=5000)
     service.speak_test.assert_called_once_with()

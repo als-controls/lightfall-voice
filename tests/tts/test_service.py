@@ -9,9 +9,10 @@ import threading
 from lightfall_utils.ipc.services.client import ServiceClient
 from lightfall_utils.ipc.services.core import NatsCore
 from lightfall_utils.ipc.services.descriptor import ServiceDescriptor
+from lightfall_voice.tts_service import models
 from lightfall_voice.tts_service.models import ModelFilesMissing
 from lightfall_voice.tts_service.service import make_host
-from lightfall_voice.tts_service.synth import RATE, FakeSynth
+from lightfall_voice.tts_service.synth import RATE, FakeSynth, KokoroSynth
 
 SCOPE = "lftts"
 
@@ -614,4 +615,49 @@ def test_speed_clamping_and_config_merge_and_session_end(broker_url):
     assert len(seen_args) == 3  # "Never reached." was skipped after session end
     assert sess_chunks == [(0, b"", True)]
     assert errors[0]["stream_id"] == sid_sess
+
+
+def test_missing_kokoro_reports_install_hint(broker_url, monkeypatch):
+    import sys
+    from lightfall_voice.tts_service.service import INSTALL_HINT
+
+    monkeypatch.setitem(sys.modules, "kokoro_onnx", None)
+
+    async def go():
+        r = await _rig(broker_url, synth_factory=KokoroSynth)
+        try:
+            await _until(lambda: r.host.summary.get("status") == "error")
+            cfg = await r.client.call("config.get", {})
+            speak = await r.client.call("speak", {"text": "Hello."})
+            return r.host.state, dict(r.host.summary), r.client.health, cfg, speak
+        finally:
+            await r.close()
+
+    state, summary, health, cfg, speak = _run(go())
+    assert state == "error"
+    assert summary["status"] == "error"
+    assert summary["error"] == INSTALL_HINT == "Install lightfall-voice[tts-service]"
+    assert health == "up"
+    assert cfg["status"] == "ok"
+    assert speak["code"] == "unknown"
+
+
+def test_missing_platformdirs_reports_install_hint(broker_url, monkeypatch):
+    import sys
+    from lightfall_voice.tts_service.service import INSTALL_HINT
+
+    monkeypatch.setitem(sys.modules, "platformdirs", None)
+
+    async def go():
+        r = await _rig(broker_url, resolver=models.resolve)
+        try:
+            await _until(lambda: r.host.summary.get("status") == "error")
+            return r.host.state, dict(r.host.summary)
+        finally:
+            await r.close()
+
+    state, summary = _run(go())
+    assert state == "error"
+    assert summary["status"] == "error"
+    assert summary["error"] == INSTALL_HINT == "Install lightfall-voice[tts-service]"
 

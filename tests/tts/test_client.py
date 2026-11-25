@@ -116,6 +116,8 @@ class FakeManager(QObject):
         self._client = client
         self.started: list[str] = []
         self.stopped: list[str] = []
+        self.restarted: list[str] = []
+        self._statuses: list[dict] = []
 
     def client(self, name: str) -> FakeClient | None:
         return self._client if name == "tts" else None
@@ -128,8 +130,11 @@ class FakeManager(QObject):
         self._client = None
         self.services_changed.emit()
 
+    def restart(self, name: str) -> None:
+        self.restarted.append(name)
+
     def statuses(self) -> list[dict]:
-        return []
+        return list(self._statuses)
 
     def create(self, client: FakeClient) -> None:
         self._client = client
@@ -249,20 +254,21 @@ def test_high_protected_then_pending_plays(rig):
 def test_stop_all_stops_player_and_cancels_stream(rig):
     rig.client.calls.clear()
     rig.tts.speak("High item", priority="high", ttl=30.0)
+    rig.tts.speak("Queued high", priority="high", ttl=20.0)
     rig.tts.speak("Queued normal", priority="normal", ttl=10.0)
     assert rig.player.is_playing
 
     interrupted = rig.tts.stop_all()
-    assert isinstance(interrupted, SpeechItem)
-    assert interrupted.text == "High item"
-    assert interrupted.priority == "high"
-    assert interrupted.deadline == 130.0
+    assert [i.text for i in interrupted] == ["High item", "Queued high"]
+    assert all(isinstance(i, SpeechItem) and i.priority == "high" for i in interrupted)
+    assert interrupted[0].deadline == 130.0
+    assert interrupted[1].deadline == 120.0
     assert rig.client.calls[-1] == ("cancel", {"stream_id": "s1"})
     assert not rig.player.is_playing
 
     # Requeue submits with original deadline
     rig.now = 120.0
-    rig.tts.requeue(interrupted)
+    rig.tts.requeue(interrupted[0])
     assert rig.player.begun[-1] == ("s2", 24000, 1)
 
 
@@ -499,21 +505,25 @@ def test_chunks_before_reply_are_replayed(rig):
         "Second item",
     ]
 
-    # Also verify the 64-chunk cap drops the oldest chunks when exceeded
+    # On overflow past 64 chunks for a sid, mark that sid failed without dropping
+    # the oldest chunk; when its reply arrives, finish the item as failed and cancel.
     pending2: concurrent.futures.Future = concurrent.futures.Future()
     rig.client.speak_futures.append(pending2)
     rig.player.finished.emit("s1")
     rig.player.fed.clear()
     rig.tts.speak("Capped item", priority="high")
+    rig.tts.speak("After overflow", priority="high")
     for seq in range(MAX_EARLY_CHUNKS + 5):
         rig.client.stream_chunk.emit("s_cap", seq, bytes([seq]), False)
     assert len(rig.tts._early_chunks["s_cap"]) == MAX_EARLY_CHUNKS
+    assert rig.tts._early_chunks["s_cap"][0] == (0, b"\x00", False)
+    assert "s_cap" in rig.tts._early_errors
     pending2.set_result(
         {"status": "ok", "stream_id": "s_cap", "rate": 24000, "channels": 1}
     )
-    assert len(rig.player.fed) == MAX_EARLY_CHUNKS
-    assert rig.player.fed[0] == ("s_cap", bytes([5]), False)
-    assert rig.player.fed[-1] == ("s_cap", bytes([MAX_EARLY_CHUNKS + 4]), False)
+    assert rig.player.fed == []
+    assert ("cancel", {"stream_id": "s_cap"}) in rig.client.calls
+    assert rig.player.begun[-1] == ("s2", 24000, 1)
 
 
 def test_speech_error_for_current_item_advances_queue(rig):
@@ -682,3 +692,107 @@ def test_speak_from_worker_thread_is_marshalled(rig, qtbot):
     assert seen_threads == [True]
     assert rig.client.calls[0][0] == "speak"
     assert rig.client.calls[0][1]["text"] == "From a worker"
+
+
+def test_python_change_restarts_service(rig):
+    rig.client.calls.clear()
+    rig.tts.speak("Playing before python change", priority="high")
+    assert rig.player.is_playing
+
+    rig.tts.apply_settings(
+        OutputSettings(
+            enabled=True,
+            speed=1.25,
+            quality="fp16",
+            model_dir="",
+            output_device="dev0",
+            default_voice="af_bella",
+            python="C:/tts/python.exe",
+        )
+    )
+    assert rig.manager.restarted == ["tts"]
+    assert not rig.player.is_playing
+
+    # Guard against KeyError when tts is not registered
+    def raise_key_error(name: str) -> None:
+        raise KeyError(name)
+
+    rig.manager.restart = raise_key_error
+    rig.tts.apply_settings(
+        OutputSettings(
+            enabled=True,
+            speed=1.25,
+            quality="fp16",
+            model_dir="",
+            output_device="dev0",
+            default_voice="af_bella",
+            python="C:/tts2/python.exe",
+        )
+    )
+
+    # Guard against a manager without a restart attribute
+    rig.manager.restart = None  # type: ignore[assignment]
+    rig.tts.apply_settings(
+        OutputSettings(
+            enabled=True,
+            speed=1.25,
+            quality="int8",
+            model_dir="",
+            output_device="dev0",
+            default_voice="af_bella",
+            python="C:/tts3/python.exe",
+        )
+    )
+    assert rig.client.calls[-1][0] == "config.set"
+
+
+def test_degraded_health_stays_ready(rig):
+    rig.client.calls.clear()
+    rig.client.set_health("degraded", "heartbeat late")
+    assert rig.tts.state == "ready"
+    assert rig.tts.last_error == ""
+
+    rig.tts.speak("Still speaks while degraded")
+    assert rig.client.calls == [
+        ("speak", {"text": "Still speaks while degraded", "voice": "af_bella", "speed": 1.25})
+    ]
+
+
+def test_last_error_from_summary_and_client(qtbot):
+    r = Rig()
+    try:
+        assert r.tts.state == "ready"
+        assert r.tts.last_error == ""
+
+        r.client.set_summary(
+            status="error", model="fp16", error="Install lightfall-voice[tts-service]"
+        )
+        assert r.tts.state == "unavailable"
+        assert r.tts.last_error == "Install lightfall-voice[tts-service]"
+
+        r.client.set_summary(status="ready", model="fp16", error="")
+        assert r.tts.state == "ready"
+        assert r.tts.last_error == ""
+
+        r.client.set_health("down", "Child process exited with code 1")
+        assert r.tts.state == "unavailable"
+        assert r.tts.last_error == "Child process exited with code 1"
+
+        r.client.set_health("up", "")
+        assert r.tts.state == "ready"
+        assert r.tts.last_error == ""
+    finally:
+        r.tts.stop()
+
+    r_no_client = Rig(enabled=True, client=False)
+    try:
+        assert r_no_client.tts.state == "loading"
+        assert r_no_client.tts.last_error == ""
+        r_no_client.manager._statuses = [
+            {"name": "tts", "health": "down", "last_error": "local broker failed to start"}
+        ]
+        r_no_client.manager.services_changed.emit()
+        assert r_no_client.tts.state == "unavailable"
+        assert r_no_client.tts.last_error == "local broker failed to start"
+    finally:
+        r_no_client.tts.stop()
