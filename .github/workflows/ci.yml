@@ -43,7 +43,8 @@ jobs:
       # Test against lightfall's master, not the last PyPI release: a plugin must work
       # with the app it ships next to (lightfall 0.3.0 on PyPI is far behind master).
       - run: pip install "lightfall @ git+https://github.com/als-controls/lightfall@master"
-      - run: pip install -e ".[dev]" pytest-xdist pytest-timeout pytest-cov
+      - run: pip install -e ".[dev,tts-service]" pytest-xdist pytest-timeout pytest-cov
+      - run: python -c "import kokoro_onnx, espeakng_loader"
       - name: Run tests
         # xdist spawns fresh workers (not fork) — avoids Qt fork-safety issues.
         # --max-worker-restart=5 recovers from PySide6 segfaults in headless CI.
