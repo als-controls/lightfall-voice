@@ -11,6 +11,10 @@ from lightfall_voice.audio import RATE, rms
 Event = Literal["listening", "silence", "no_speech", "max"]
 
 
+# Silence this long before speech is detected resets the speech run.
+GAP_RESET_S = 0.3
+
+
 class EndpointDetector:
     def __init__(
         self,
@@ -60,8 +64,11 @@ class EndpointDetector:
                 self._speech_s += wsec
                 self._trailing_s = 0.0
             else:
-                self._speech_s = 0.0
                 self._trailing_s += wsec
+                # Speech dips between words and on stop consonants: only a real pause
+                # (not a 50 ms window) resets the run toward min_speech_s.
+                if self._trailing_s >= GAP_RESET_S - 1e-9:
+                    self._speech_s = 0.0
             if not self._detected and self._speech_s >= self.min_speech_s - 1e-9:
                 self._detected = True
                 listening = True

@@ -60,6 +60,16 @@ def test_non_contiguous_blips_do_not_accumulate_to_min_speech():
     assert _run(det, audio) == ["no_speech"]
 
 
+def test_speech_with_short_dips_is_detected():
+    """Words separated by 100 ms dips still add up to speech."""
+    det = EndpointDetector()
+    parts = []
+    for _ in range(5):
+        parts += [_tone(0.15), _zeros(0.1)]
+    audio = np.concatenate(parts + [_zeros(1.2)])
+    assert _run(det, audio) == ["listening", "silence"]
+
+
 def test_custom_silence_s():
     det = EndpointDetector(silence_s=0.3)
     assert _run(det, np.concatenate([_tone(1.0), _zeros(0.5)])) == ["listening", "silence"]
