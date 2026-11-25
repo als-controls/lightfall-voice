@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QTimer
 from PySide6.QtGui import QAction
 
 from lightfall.utils.logging import logger
@@ -21,6 +21,8 @@ from lightfall_voice.stt.controller import CLAUDE_PANEL_ID, _alive, _default_win
 
 _ICON_SPEAKING = "mdi6.volume-high"
 _ICON_MUTED = "mdi6.volume-off"
+_RETRY_MS = 500
+_MAX_RETRIES = 240  # two minutes
 
 
 def save_agent_overrides(get_prefs: Callable[[], object]) -> Callable[[VoiceSettings], None]:
@@ -73,6 +75,11 @@ class SessionMuteAction(QObject):
         self._panel_lookup = panel_lookup or _default_panel_lookup
         self._panel = None
         self._action: QAction | None = None
+        self._retries_left = 0
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.setInterval(_RETRY_MS)
+        self._retry_timer.timeout.connect(self._retry_install)
         service.settings_changed.connect(self.refresh)
 
     @property
@@ -91,7 +98,12 @@ class SessionMuteAction(QObject):
             logger.exception("lightfall-voice: Assistant panel lookup failed")
             return
         if panel is None or not hasattr(panel, "add_title_bar_action"):
+            # agents_changed can fire while the Assistant panel is still being built,
+            # before the docking manager registers it; with no later agents_changed the
+            # button would never appear. Retry briefly until the panel shows up.
+            self._schedule_retry()
             return
+        self._retry_timer.stop()
         action = QAction(panel)
         action.setCheckable(True)
         action.triggered.connect(self._on_triggered)
@@ -101,6 +113,21 @@ class SessionMuteAction(QObject):
             signal.connect(self.refresh)
         self._panel, self._action = panel, action
         self.refresh()
+
+    def _schedule_retry(self) -> None:
+        if self._retry_timer.isActive():
+            return
+        if self._retries_left <= 0:
+            self._retries_left = _MAX_RETRIES
+        self._retry_timer.start()
+
+    def _retry_install(self) -> None:
+        self._retries_left -= 1
+        if self._retries_left <= 0:
+            # Give up until the next AgentBus.agents_changed calls install() again.
+            logger.debug("lightfall-voice: Assistant panel not found; mute button not installed")
+            return
+        self.install()
 
     def _current_agent_name(self) -> str | None:
         if self._panel is None or not _alive(self._panel):

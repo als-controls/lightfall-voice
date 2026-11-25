@@ -58,6 +58,42 @@ def test_install_waits_for_the_panel(qtbot):
     assert holder["panel"].actions == [mute.action]
 
 
+def test_install_retries_until_the_panel_is_registered(qtbot, monkeypatch):
+    """agents_changed can fire before the docking manager registers the panel:
+    install() keeps retrying on a timer, without another agents_changed."""
+    monkeypatch.setattr("lightfall_voice.mute_action._RETRY_MS", 10)
+    service = VoiceService(VoiceSettings(), client=MagicMock(), widget_scanner=lambda: [])
+    holder = {"panel": None, "lookups": 0}
+
+    def lookup():
+        holder["lookups"] += 1
+        return holder["panel"]
+
+    mute = SessionMuteAction(service, save=lambda s: None, panel_lookup=lookup)
+    mute.install()  # the only agents_changed: panel not registered yet
+    assert mute.action is None
+    qtbot.waitUntil(lambda: holder["lookups"] >= 3, timeout=2000)
+    holder["panel"] = FakePanel()
+    qtbot.waitUntil(lambda: mute.action is not None, timeout=2000)
+    assert holder["panel"].actions == [mute.action]
+    n = holder["lookups"]
+    qtbot.wait(60)
+    assert holder["lookups"] == n  # retries stop once installed
+
+
+def test_install_retries_give_up(qtbot, monkeypatch):
+    monkeypatch.setattr("lightfall_voice.mute_action._RETRY_MS", 5)
+    monkeypatch.setattr("lightfall_voice.mute_action._MAX_RETRIES", 3)
+    service = VoiceService(VoiceSettings(), client=MagicMock(), widget_scanner=lambda: [])
+    calls = []
+    mute = SessionMuteAction(service, save=lambda s: None,
+                             panel_lookup=lambda: calls.append(1))
+    mute.install()
+    qtbot.wait(200)
+    assert len(calls) == 3  # the first install plus two retries, then stop
+    assert mute.action is None
+
+
 def test_toggle_mutes_visible_session_and_persists(qtbot):
     service, panel, mute, saved = make(qtbot)
     panel.current = _widget("lightfall")
