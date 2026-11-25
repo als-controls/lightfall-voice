@@ -562,6 +562,7 @@ def test_speech_error_for_current_item_advances_queue(rig):
         {"status": "ok", "stream_id": "s_pending_err", "rate": 24000, "channels": 1}
     )
     assert rig.player.begun[-1] == ("s3", 24000, 1)
+    assert "cancel" not in rig.client.actions()
     assert [c[1].get("text") for c in rig.client.calls if c[0] == "speak"] == [
         "First high",
         "Second high",

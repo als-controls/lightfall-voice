@@ -82,6 +82,10 @@ def fake_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_downloads_and_verifies(fake_env):
+    import inspect
+
+    assert not hasattr(models, "_DEFAULT_BASE_URL")
+    assert inspect.signature(resolve).parameters["base_url"].default is None
     assert BASE_URL == (
         "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
     )
@@ -104,7 +108,7 @@ def test_downloads_and_verifies(fake_env):
     }
     assert default_cache_dir().name == "kokoro"
 
-    model_path, voices_path = resolve("int8", base_url=fake_env["base_url"])
+    model_path, voices_path = resolve("int8")
 
     assert model_path == fake_env["cache_dir"] / "kokoro-v1.0.int8.onnx"
     assert voices_path == fake_env["cache_dir"] / "voices-v1.0.bin"
@@ -168,8 +172,8 @@ def test_model_dir_used_without_download(fake_env, tmp_path: Path):
     custom_dir.mkdir()
     m_file = custom_dir / "kokoro-v1.0.int8.onnx"
     v_file = custom_dir / "voices-v1.0.bin"
-    m_file.write_bytes(b"unverified-local-model")
-    v_file.write_bytes(b"unverified-local-voices")
+    m_file.write_bytes(b"x" * len(INT8_BYTES))
+    v_file.write_bytes(b"y" * len(VOICES_BYTES))
 
     model_path, voices_path = resolve(
         "int8", model_dir=str(custom_dir), base_url=fake_env["base_url"]
@@ -188,10 +192,36 @@ def test_model_dir_missing_file_names_it(fake_env, tmp_path: Path):
         resolve("int8", model_dir=str(custom_dir), base_url=fake_env["base_url"])
     assert str(exc_info.value) == f"Missing kokoro-v1.0.int8.onnx in {custom_dir}"
 
-    (custom_dir / "kokoro-v1.0.int8.onnx").write_bytes(b"only-model")
+    (custom_dir / "kokoro-v1.0.int8.onnx").write_bytes(INT8_BYTES)
     with pytest.raises(ModelFilesMissing) as exc_info:
         resolve("int8", model_dir=str(custom_dir), base_url=fake_env["base_url"])
     assert str(exc_info.value) == f"Missing voices-v1.0.bin in {custom_dir}"
+    assert fake_env["requests"] == []
+
+
+def test_model_dir_wrong_size_raises(fake_env, tmp_path: Path):
+    custom_dir = tmp_path / "custom_models"
+    custom_dir.mkdir()
+    m_file = custom_dir / "kokoro-v1.0.int8.onnx"
+    v_file = custom_dir / "voices-v1.0.bin"
+    m_file.write_bytes(b"short")
+    v_file.write_bytes(VOICES_BYTES)
+
+    with pytest.raises(ModelFilesMissing) as exc_info:
+        resolve("int8", model_dir=str(custom_dir))
+    assert str(exc_info.value) == (
+        f"Wrong size for kokoro-v1.0.int8.onnx in {custom_dir} "
+        f"(expected {len(INT8_BYTES)} bytes)"
+    )
+
+    m_file.write_bytes(INT8_BYTES)
+    v_file.write_bytes(b"short")
+    with pytest.raises(ModelFilesMissing) as exc_info:
+        resolve("int8", model_dir=str(custom_dir))
+    assert str(exc_info.value) == (
+        f"Wrong size for voices-v1.0.bin in {custom_dir} "
+        f"(expected {len(VOICES_BYTES)} bytes)"
+    )
     assert fake_env["requests"] == []
 
 

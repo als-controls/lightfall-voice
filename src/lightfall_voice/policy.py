@@ -111,9 +111,6 @@ class VoiceSettings:
         prefs.set(_KEYS["output_device"], self.output_device)
         prefs.set(_KEYS["python"], self.python)
 
-    def to_preferences(self, prefs) -> None:
-        self.save(prefs)
-
     def to_output(self) -> OutputSettings:
         return OutputSettings(
             enabled=self.enabled,

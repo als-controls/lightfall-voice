@@ -10,10 +10,9 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
-_DEFAULT_BASE_URL = (
+BASE_URL = (
     "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
 )
-BASE_URL = _DEFAULT_BASE_URL
 
 MODEL_FILES: dict[str, tuple[str, int, str]] = {
     "int8": (
@@ -75,7 +74,7 @@ def resolve(
     quality: str,
     model_dir: str = "",
     *,
-    base_url: str = BASE_URL,
+    base_url: str | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> tuple[Path, Path]:
     if quality == "voices" or quality not in MODEL_FILES:
@@ -87,15 +86,19 @@ def resolve(
 
     if model_dir:
         root = Path(model_dir)
-        for filename, _, _ in entries:
-            if not (root / filename).is_file():
+        for filename, size, _ in entries:
+            path = root / filename
+            if not path.is_file():
                 raise ModelFilesMissing(f"Missing {filename} in {root}")
+            if path.stat().st_size != size:
+                raise ModelFilesMissing(
+                    f"Wrong size for {filename} in {root} (expected {size} bytes)"
+                )
         return root / model_entry[0], root / voices_entry[0]
 
     cache_dir = default_cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    effective_base_url = BASE_URL if base_url == _DEFAULT_BASE_URL else base_url
-    prefix = effective_base_url.rstrip("/")
+    prefix = (base_url or BASE_URL).rstrip("/")
 
     notified = False
     for filename, expected_size, expected_sha256 in entries:

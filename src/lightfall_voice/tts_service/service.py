@@ -320,7 +320,7 @@ def make_host(
                 log.exception("speech synthesis failed")
                 error = ("unknown", str(e) or type(e).__name__)
         if error is None and job.session_ended.is_set():
-            error = ("session_ended", "session ended")
+            error = ("unknown", "session ended")
         try:
             asyncio.run_coroutine_threadsafe(
                 emit_final(job, seq, error), loop

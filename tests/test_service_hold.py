@@ -118,8 +118,11 @@ def test_dispatch_from_worker_thread_while_held_waits_for_release(qtbot):
     orig_decide = service._policy.decide
 
     def tracked_clock():
-        dispatch_threads.append(QThread.currentThread() is service.thread())
-        return orig_clock()
+        on_main = QThread.currentThread() is service.thread()
+        dispatch_threads.append(on_main)
+        t = orig_clock()
+        clock["t"] += 5.0
+        return t
 
     def tracked_decide(event, now):
         decide_threads.append(QThread.currentThread() is service.thread())
@@ -129,20 +132,41 @@ def test_dispatch_from_worker_thread_while_held_waits_for_release(qtbot):
     service._policy.decide = tracked_decide
     service.hold()
 
-    ev = permission_event("lightfall", "Permission needed to run a command", clock["t"])
+    worker_t = clock["t"]
+    ev = permission_event("lightfall", "Permission needed to run a command", worker_t)
     worker = threading.Thread(target=lambda: service._dispatch(ev))
     worker.start()
     worker.join(5)
     qtbot.waitUntil(lambda: len(service._held) == 1, timeout=2000)
     QCoreApplication.processEvents()
-    assert dispatch_threads == [True]
+    assert dispatch_threads == [False]
+    assert service._held == [(ev, worker_t)]
     assert client.spoken == []
     assert decide_threads == []
 
     service.release()
+    assert dispatch_threads == [False, True]
     assert len(client.spoken) == 1
     assert client.spoken[0]["text"] == "Permission needed to run a command"
     assert decide_threads == [True]
+
+
+def test_stop_clears_held_and_resets_hold_state(qtbot):
+    w, service, client, _clock = _setup(qtbot)
+    service.hold()
+    service.hold()
+    w.agent.permission_requested.emit("r1", "Bash", {})
+    service._draining = True
+    assert len(service._held) == 1
+    assert service._hold_count == 2
+
+    service.stop()
+    assert service._held == []
+    assert service._hold_count == 0
+    assert service._draining is False
+
+    service.release()
+    assert client.spoken == []
 
 
 def test_stale_held_events_dropped(qtbot):

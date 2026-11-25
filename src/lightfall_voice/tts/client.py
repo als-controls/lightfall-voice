@@ -108,7 +108,7 @@ class TtsClient(QObject):
         self._sid: str | None = None
         self._active_item: SpeechItem | None = None
         self._early_chunks: dict[str, deque[tuple[int, bytes, bool]]] = {}
-        self._early_errors: set[str] = set()
+        self._early_errors: dict[str, bool] = {}
         self._player: Any = None
         self._replace_player(settings.output_device)
 
@@ -444,7 +444,7 @@ class TtsClient(QObject):
         ):
             if isinstance(sid, str):
                 self._early_chunks.pop(sid, None)
-                self._early_errors.discard(sid)
+                self._early_errors.pop(sid, None)
             if self._active_item is None or self._sid is not None:
                 self._early_chunks.clear()
                 self._early_errors.clear()
@@ -459,14 +459,14 @@ class TtsClient(QObject):
             self._scheduler.finished(item)
             return
         early_chunks = sorted(self._early_chunks.pop(sid, ()), key=lambda c: c[0])
-        early_error = sid in self._early_errors
+        cancel_remote = self._early_errors.get(sid)
         self._early_chunks.clear()
         self._early_errors.clear()
         rate = int(reply.get("rate") or DEFAULT_RATE)
         channels = int(reply.get("channels") or DEFAULT_CHANNELS)
         self._sid = sid
-        if early_error:
-            self._finish_failed_item(cancel_remote=True)
+        if cancel_remote is not None:
+            self._finish_failed_item(cancel_remote=cancel_remote)
             return
         self._player.begin(sid, rate, channels)
         if self._sid != sid or self._active_item is not item:
@@ -524,7 +524,7 @@ class TtsClient(QObject):
                 self._early_chunks[sid] = buf
             if len(buf) >= MAX_EARLY_CHUNKS:
                 logger.warning("lightfall-voice: early chunk buffer overflow for {}", sid)
-                self._early_errors.add(sid)
+                self._early_errors[sid] = True
                 return
             buf.append((int(seq), bytes(data), bool(final)))
             return
@@ -545,7 +545,7 @@ class TtsClient(QObject):
         if not isinstance(sid, str):
             return
         if self._active_item is not None and self._sid is None:
-            self._early_errors.add(sid)
+            self._early_errors[sid] = False
             return
         if sid == self._sid and self._active_item is not None:
             self._finish_failed_item(cancel_remote=False)

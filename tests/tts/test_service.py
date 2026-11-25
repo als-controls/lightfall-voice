@@ -615,6 +615,8 @@ def test_speed_clamping_and_config_merge_and_session_end(broker_url):
     assert len(seen_args) == 3  # "Never reached." was skipped after session end
     assert sess_chunks == [(0, b"", True)]
     assert errors[0]["stream_id"] == sid_sess
+    assert errors[0]["code"] == "unknown"
+    assert errors[0]["message"] == "session ended"
 
 
 def test_missing_kokoro_reports_install_hint(broker_url, monkeypatch):

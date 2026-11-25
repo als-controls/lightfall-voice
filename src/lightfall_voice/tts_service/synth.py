@@ -9,16 +9,44 @@ from typing import Any
 import numpy as np
 
 RATE = 24000
-MAX_SENTENCE_LEN = 400
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;])\s+|\r?\n")
+MAX_SENTENCE_LEN = 200
+_ABBREVIATIONS = frozenset(
+    {
+        "dr",
+        "mr",
+        "mrs",
+        "ms",
+        "prof",
+        "st",
+        "vs",
+        "etc",
+        "e.g",
+        "i.e",
+        "approx",
+        "no",
+        "fig",
+        "sr",
+        "jr",
+    }
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;])\s+")
+
+
+def _is_non_breaking_period(token: str) -> bool:
+    if not token.endswith("."):
+        return False
+    word = token[:-1].lstrip("([{\"'")
+    if len(word) == 1 and word.isupper():
+        return True
+    return word.lower() in _ABBREVIATIONS
 
 
 def _split_long(part: str, max_len: int = MAX_SENTENCE_LEN) -> list[str]:
     out: list[str] = []
     while len(part) > max_len:
-        comma = part.rfind(",", 0, max_len)
-        if comma > 0:
-            head, part = part[: comma + 1].strip(), part[comma + 1 :].strip()
+        punct = max(part.rfind(c, 0, max_len) for c in (",", ";", ":"))
+        if punct > 0:
+            head, part = part[: punct + 1].strip(), part[punct + 1 :].strip()
         else:
             space = part.rfind(" ", 0, max_len)
             if space > 0:
@@ -33,18 +61,29 @@ def _split_long(part: str, max_len: int = MAX_SENTENCE_LEN) -> list[str]:
 
 
 def split_sentences(text: str) -> list[str]:
-    """Split ``text`` into speakable sentence chunks of at most 400 characters."""
+    """Split ``text`` into speakable sentence chunks of at most 200 characters."""
     if not text:
         return []
     result: list[str] = []
-    for raw in _SENTENCE_SPLIT_RE.split(text):
-        part = raw.strip()
-        if not part:
-            continue
-        if len(part) > MAX_SENTENCE_LEN:
-            result.extend(_split_long(part))
-        else:
-            result.append(part)
+    for line in text.splitlines():
+        start = 0
+        raw_parts: list[str] = []
+        for match in _SENTENCE_SPLIT_RE.finditer(line):
+            segment = line[start : match.start()]
+            words = segment.rsplit(None, 1)
+            if words and _is_non_breaking_period(words[-1]):
+                continue
+            raw_parts.append(segment)
+            start = match.end()
+        raw_parts.append(line[start:])
+        for raw in raw_parts:
+            part = raw.strip()
+            if not part:
+                continue
+            if len(part) > MAX_SENTENCE_LEN:
+                result.extend(_split_long(part))
+            else:
+                result.append(part)
     return result
 
 

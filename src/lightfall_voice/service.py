@@ -170,6 +170,10 @@ class VoiceService(QObject):
             except (RuntimeError, TypeError):
                 pass
             self._bus = None
+        with self._hold_lock:
+            self._held.clear()
+            self._hold_count = 0
+            self._draining = False
         self._client.stop()
         self._attached.clear()
         self._attached_names.clear()
@@ -300,11 +304,13 @@ class VoiceService(QObject):
             priority=priority,
         )
 
-    def _dispatch(self, event: VoiceEvent) -> None:
+    def _dispatch(
+        self, event: VoiceEvent, received_at: float | None = None
+    ) -> None:
+        now = self._clock() if received_at is None else received_at
         if QThread.currentThread() is not self.thread():
-            invoke_in_main_thread(self._dispatch, event)
+            invoke_in_main_thread(self._dispatch, event, now)
             return
-        now = self._clock()
         with self._hold_lock:
             if self._hold_count > 0 or self._draining:
                 self._held.append((event, now))

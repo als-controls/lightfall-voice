@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from lightfall_voice.tts_service.synth import (
+    MAX_SENTENCE_LEN,
     RATE,
     FakeSynth,
     KokoroSynth,
@@ -35,22 +36,57 @@ def test_split_keeps_punctuation():
     assert parts == ["Hello.", "World!", "Ready?", "Go;", "now."]
 
 
+def test_split_sentences_abbreviations_and_initials():
+    assert split_sentences("Ask Dr. Smith about it. Then stop.") == [
+        "Ask Dr. Smith about it.",
+        "Then stop.",
+    ]
+    assert split_sentences("See e.g. the scan. Done.") == [
+        "See e.g. the scan.",
+        "Done.",
+    ]
+    assert split_sentences("J. R. Smith arrived.") == [
+        "J. R. Smith arrived.",
+    ]
+    assert split_sentences(
+        "Mr. and Mrs. Jones met Ms. Lee and Prof. X at St. Jude vs. No. 5, "
+        "i.e. approx. 2 km, see Fig. 3 for Sr. and Jr. etc. today. Next."
+    ) == [
+        "Mr. and Mrs. Jones met Ms. Lee and Prof. X at St. Jude vs. No. 5, "
+        "i.e. approx. 2 km, see Fig. 3 for Sr. and Jr. etc. today.",
+        "Next.",
+    ]
+
+
 def test_split_long_sentence_at_comma():
-    clause1 = ("alpha " * 35).strip()
-    clause2 = ("beta " * 50).strip()
+    assert MAX_SENTENCE_LEN == 200
+    clause1 = ("alpha " * 20).strip()
+    clause2 = ("beta " * 25).strip()
     long_text = f"{clause1}, {clause2}."
-    assert len(long_text) > 400
+    assert len(long_text) > 200
     parts = split_sentences(long_text)
     assert len(parts) == 2
-    assert all(len(p) <= 400 for p in parts)
+    assert all(len(p) <= 200 for p in parts)
     assert parts[0] == f"{clause1},"
     assert parts[1] == f"{clause2}."
 
-    no_comma = ("gamma " * 80).strip() + "."
-    assert len(no_comma) > 400
+    colon_text = f"{clause1}: {clause2}."
+    assert len(colon_text) > 200
+    colon_parts = split_sentences(colon_text)
+    assert colon_parts == [f"{clause1}:", f"{clause2}."]
+    assert all(len(p) <= 200 for p in colon_parts)
+
+    semi_text = f"{clause1};{clause2}."
+    assert len(semi_text) > 200
+    semi_parts = split_sentences(semi_text)
+    assert semi_parts == [f"{clause1};", f"{clause2}."]
+    assert all(len(p) <= 200 for p in semi_parts)
+
+    no_comma = ("gamma " * 40).strip() + "."
+    assert len(no_comma) > 200
     space_parts = split_sentences(no_comma)
     assert len(space_parts) == 2
-    assert all(len(p) <= 400 for p in space_parts)
+    assert all(len(p) <= 200 for p in space_parts)
 
 
 def test_split_drops_empty():
