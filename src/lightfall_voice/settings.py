@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from lightfall.ui.preferences.form.schema import EditorSpec, FormValues
 
+QUALITIES = (("Higher (fp16)", "fp16"), ("Standard (int8)", "int8"))
 MODELS = ("base", "small", "medium", "large-v3", "distil-large-v3")
 DEVICES = (("Auto (GPU if available)", "auto"), ("GPU", "gpu"), ("CPU", "cpu"))
 LANGUAGES = (
@@ -81,6 +82,8 @@ _USER_SPECS = (
     ("voice.events.errors", bool, "Errors"),
     ("voice.default_voice", str, "Default voice"),
     ("voice.agent_overrides", dict, "Agents"),
+    ("voice.output.speed", float, "Speed"),
+    ("voice.output.quality", str, "Quality"),
     ("voice.input.enabled", bool, "Enable voice input"),
     ("voice.input.hotkey", str, "Hotkey"),
     ("voice.input.model", str, "Model"),
@@ -102,6 +105,14 @@ def set_controller(controller: VoiceInputController | None) -> None:
     _controller = controller
 
 
+def _output_devices() -> list[tuple[str, str]]:
+    """"System default" ("") then this machine's audio outputs, listed when the page is shown."""
+    options = [("", "System default")]
+    for device in QMediaDevices.audioOutputs():
+        options.append((bytes(device.id()).decode(), device.description()))
+    return options
+
+
 def _input_devices() -> list[tuple[str, str]]:
     """"System default" ("") then this machine's microphones, listed when the page is shown."""
     options = [("", "System default")]
@@ -115,6 +126,9 @@ def _test_voice() -> str:
     service = service_module.get_service()
     if service is None:
         return "Voice service not running"
+    state = getattr(getattr(service, "_client", None), "state", "ready")
+    if isinstance(state, str) and state != "ready":
+        return f"Voice service {state}"
     service.speak_test()
     return "Spoken"
 
@@ -155,6 +169,9 @@ class VoiceSettingsPlugin(SettingsPlugin):
             service = service_module.VoiceService(settings)
             service.start()
             service_module.set_service(service)
+            app = QCoreApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(service.stop)
         except Exception:
             # Voice input does not need spoken notifications: carry on without holds.
             logger.exception("lightfall-voice: failed to start VoiceService")
@@ -240,6 +257,10 @@ class VoiceSettingsPlugin(SettingsPlugin):
             Section("Agents", (
                 _field("voice.agent_overrides", Custom(agent_voices_editor), description=AGENTS_NOTE),
             )),
+            Section("Voice output", (
+                _field("voice.output.speed", Number(0.5, 2.0, 0.1), placeholder="1.0"),
+                _field("voice.output.quality", Choice([(v, label) for label, v in QUALITIES])),
+            )),
             Section("Voice input", (
                 _field("voice.input.enabled", Toggle()),
                 _field("voice.input.hotkey", Custom(hotkey_editor), placeholder="F9"),
@@ -248,6 +269,19 @@ class VoiceSettingsPlugin(SettingsPlugin):
                 _field("voice.input.silence_s", Number(0.3, 5.0, 0.1), unit="s", placeholder="1.0"),
             )),
             Section("Voice input on this machine", (
+                _field("voice.output.output_device", Choice(_output_devices), label="Output device"),
+                _field(
+                    "voice.output.model_dir",
+                    Path(mode="dir"),
+                    label="Output model directory",
+                    placeholder="Empty: the user cache",
+                ),
+                _field(
+                    "voice.output.python",
+                    Path(mode="file"),
+                    label="Output Python interpreter",
+                    placeholder="Empty: Lightfall's own interpreter",
+                ),
                 _field("voice.input.device", Choice([(v, label) for label, v in DEVICES]), label="Device"),
                 _field("voice.input.input_device", Choice(_input_devices), label="Input device"),
                 _field(

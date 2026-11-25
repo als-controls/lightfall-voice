@@ -1,8 +1,9 @@
 # lightfall-voice
 
-Voice notifications plugin for Lightfall. Speaks Claude agent events through
-the local Kokoro voice daemon from `~/.claude/hooks/voice_notifications`
-(JSON line protocol, TCP `127.0.0.1:52849`).
+Voice notifications and push-to-talk voice input plugin for Lightfall. Speaks
+Claude agent events through a local `tts` service (`kokoro-onnx`) and
+transcribes microphone utterances through a local `stt` service
+(`faster-whisper`), both launched on demand by Lightfall's `ServiceManager`.
 
 ## What it speaks
 
@@ -20,10 +21,9 @@ Voice Notifications → Agents**; a muted agent's permission requests and
 errors still speak.
 
 Voices: **Preferences → Voice Notifications → Voice notifications → Default voice** sets
-the voice for every agent (default `af_heart`, the voice ascribe-link uses);
-the Agents list picks a voice per agent. Both combos are editable, so any
-Kokoro voice id can be typed. An empty default leaves the choice to the
-daemon's `config.json` (`kokoro_voice`).
+the voice for every agent (default `af_heart`, "Heart (default)", the voice
+ascribe-link uses); the Agents list picks a voice per agent. Both combos are
+editable, so any Kokoro voice id can be typed.
 
 Agents other than the main `lightfall` assistant are named in
 those phrases. Low-priority events older than 10 s are dropped, never
@@ -31,12 +31,45 @@ spoken late.
 
 ## Install
 
-    pip install lightfall-voice
+    pip install lightfall-voice[tts-service]   # spoken notifications (kokoro-onnx)
+    pip install lightfall-voice[stt-service]   # voice input (faster-whisper, CPU)
+    pip install lightfall-voice[voice]         # both speech output and voice input
+    pip install lightfall-voice[gpu]           # voice input with CUDA 12 (cuBLAS + cuDNN wheels)
 
 For development, from a clone: `pip install -e ".[dev]"`.
 
 Registers via the `lightfall.plugins` entry point; the settings page appears
 under Preferences → Plugins → Voice Notifications.
+
+## Voice output (text to speech)
+
+Spoken notifications run through a local `tts` service (`kokoro-onnx`) that Lightfall
+starts when `voice.enabled` is on. The base install never imports `kokoro_onnx` or
+`onnxruntime`; if the service dependencies live in a separate environment, point
+`voice.output.python` at that interpreter.
+
+On first use, the `tts` service downloads the `fp16` Kokoro model (~205 MB total:
+`kokoro-v1.0.fp16.onnx` + `voices-v1.0.bin`) into the user cache directory
+(`platformdirs.user_cache_dir("lightfall-voice")/kokoro`) and verifies SHA-256
+checksums.
+
+Offline machines: set `voice.output.model_dir` to a folder holding:
+- `kokoro-v1.0.fp16.onnx` (for `fp16`, "Higher (fp16)", the default) or
+  `kokoro-v1.0.int8.onnx` (for `int8`, "Standard (int8)")
+- `voices-v1.0.bin`
+
+Both files are downloadable from
+https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0. Nothing is
+downloaded when `voice.output.model_dir` is set.
+
+| Setting | Key | Default |
+|---|---|---|
+| Enable voice notifications | `voice.enabled` | on |
+| Speed | `voice.output.speed` | `1.0` (`0.5`–`2.0`, step `0.1`) |
+| Quality | `voice.output.quality` | `fp16` (`fp16` "Higher (fp16)", `int8` "Standard (int8)") |
+| Output device | `voice.output.output_device` | system default |
+| Output model directory | `voice.output.model_dir` | empty (`platformdirs.user_cache_dir("lightfall-voice")/kokoro`) |
+| Output Python interpreter | `voice.output.python` | empty (Lightfall's own) |
 
 ## Voice input (speech to text)
 
@@ -75,24 +108,20 @@ there.
 
 While you dictate, spoken notifications are held and released afterwards.
 
-## Requirements
-
-- The voice daemon must accept hookless direct messages
-  (`voice_daemon.py` commit "Add hookless direct-message path"). The plugin
-  does not start the daemon; if it is unreachable, notifications are
-  silently dropped.
-
 ## Settings keys
 
 `voice.enabled`, `voice.events.{tools,summary,permission,errors}`,
-`voice.daemon_host`, `voice.daemon_port`, `voice.default_voice`, `voice.input.*`
-(above), `voice.agent_overrides` (`{agent_name: {"muted": bool, "voice": "af_sky"}}`,
-set from the Agents list).
+`voice.default_voice`, `voice.agent_overrides`
+(`{agent_name: {"muted": bool, "voice": "af_sky"}}`, set from the Agents list),
+`voice.output.{speed,quality,model_dir,output_device,python}` (above), and
+`voice.input.{enabled,hotkey,model,language,silence_s,device,input_device,model_dir,python}`
+(above).
 
-`voice.daemon_host`, `voice.daemon_port` and the machine's voice input keys
-(`device`, `input_device`, `model_dir`, `python`) belong to this console and are
-set at This console; every other key is a per-user setting. Only edited keys
-are saved; a blank daemon host means the default `127.0.0.1`.
+This machine's voice output keys (`voice.output.model_dir`,
+`voice.output.output_device`, `voice.output.python`) and voice input keys
+(`voice.input.device`, `voice.input.input_device`, `voice.input.model_dir`,
+`voice.input.python`) belong to this console and are set at This console; every
+other `voice.*` key is a per-user setting. Only edited keys are saved.
 
 ## Tests
 

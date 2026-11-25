@@ -20,7 +20,10 @@ def _input_prefs(prefs, **values):
 
 
 @pytest.fixture(autouse=True)
-def _clean_globals():
+def _clean_globals(monkeypatch):
+    from PySide6.QtMultimedia import QMediaDevices
+
+    monkeypatch.setattr(QMediaDevices, "audioOutputs", staticmethod(lambda: []))
     yield
     service_module.set_service(None)
     settings_module.set_controller(None)

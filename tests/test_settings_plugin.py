@@ -1,4 +1,4 @@
-"""Voice page on the scope-aware form: notifications, agents and voice input.
+"""Voice page on the scope-aware form: notifications, agents, voice output and voice input.
 
 The old hand-built page (characterized in the commit before the rewrite) wrote every
 voice key unscoped on every save, even untouched. The form page writes only what the
@@ -10,15 +10,17 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QComboBox, QKeySequenceEdit, QLineEdit
+from PySide6.QtWidgets import QComboBox, QKeySequenceEdit, QLineEdit, QToolButton
 
 from lightfall_voice import service as service_module
 from lightfall_voice import settings as settings_module
 from lightfall_voice.policy import VoiceSettings
 from lightfall_voice.settings import VoiceSettingsPlugin
 from lightfall_voice.stt.controller import VoiceInputSettings
+from lightfall_voice.tts.client import TtsClient
 
 USER, LOCAL, BRANCH, BEAMLINE = "user:u1", "local", "branch:7.0.1.1", "beamline:7.0.1"  # as in conftest
 OVERRIDES = "voice.agent_overrides"
@@ -40,12 +42,22 @@ USER_KEYS = {
     "voice.events.errors",
     DEFAULT_VOICE,
     OVERRIDES,
+    "voice.output.speed",
+    "voice.output.quality",
     "voice.input.enabled",
     "voice.input.hotkey",
     "voice.input.model",
     "voice.input.language",
     "voice.input.silence_s",
 }
+
+
+@pytest.fixture(autouse=True)
+def _no_real_audio_outputs(monkeypatch):
+    """Never enumerate the machine's speakers/audio outputs."""
+    from PySide6.QtMultimedia import QMediaDevices
+
+    monkeypatch.setattr(QMediaDevices, "audioOutputs", staticmethod(lambda: []))
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +125,62 @@ def test_on_loaded_starts_service(voice_prefs):
     settings_module.set_controller(None)
 
 
+def test_on_loaded_starts_tts_service_only_when_enabled(voice_prefs):
+    """The (real) VoiceService/TtsClient asks ServiceManager for 'tts' only when enabled."""
+    from PySide6.QtCore import QObject, Signal
+
+    class FakePlayer(QObject):
+        finished = Signal(str)
+        failed = Signal(str)
+
+        def stop(self):
+            pass
+
+    class Manager(QObject):
+        client_created = Signal(str)
+        services_changed = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.started = []
+
+        def client(self, name):
+            return None
+
+        def ensure_started(self, name):
+            self.started.append(name)
+
+        def statuses(self):
+            return []
+
+    real_service = service_module.VoiceService
+    for enabled, expected in ((False, []), (True, ["tts"])):
+        voice_prefs.set("voice.enabled", enabled)
+        voice_prefs.calls.clear()
+        manager = Manager()
+
+        def service_factory(settings, _m=manager, _real=real_service):
+            client = TtsClient(
+                settings.to_output(),
+                manager=_m,
+                player_factory=lambda _dev: FakePlayer(),
+            )
+            return _real(settings, client=client, widget_scanner=lambda: [])
+
+        plugin = VoiceSettingsPlugin()
+        with (
+            patch.object(service_module, "VoiceService", service_factory),
+            patch.object(settings_module.controller_module, "VoiceInputController"),
+        ):
+            plugin.on_loaded()
+        assert manager.started == expected
+        service = service_module.get_service()
+        assert service is not None
+        service.stop()
+        service_module.set_service(None)
+        settings_module.set_controller(None)
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -127,13 +195,28 @@ def test_console_keys_and_user_specs(voice_prefs):
         assert name not in vars(VoiceSettingsPlugin), name
     assert not hasattr(page, "_prefs")
     assert set(page.console_keys()) == CONSOLE_KEYS
+    assert "voice.daemon_host" not in page.console_keys()
+    assert "voice.daemon_port" not in page.console_keys()
     specs = {s.key: s for s in page.specs()}
     assert set(specs) == USER_KEYS
+    assert "voice.daemon_host" not in specs
+    assert "voice.daemon_port" not in specs
     assert all(s.scopes == frozenset({"user"}) for s in specs.values())
     assert specs[OVERRIDES].type is dict
     assert specs["voice.enabled"].type is bool
+    assert specs["voice.output.speed"].type is float
+    assert specs["voice.output.quality"].type is str
     assert specs["voice.input.silence_s"].type is float
     assert page.validate_values(None) == []
+
+    defaults = VoiceSettings()
+    assert (
+        defaults.speed,
+        defaults.quality,
+        defaults.model_dir,
+        defaults.output_device,
+        defaults.python,
+    ) == (1.0, "fp16", "", "", "")
 
     for key in CONSOLE_KEYS:
         assert voice_prefs.allowed_at(key, LOCAL), key
@@ -146,9 +229,13 @@ def test_console_keys_and_user_specs(voice_prefs):
 
     sections = page.sections()
     assert [s.title for s in sections] == [
-        "Voice notifications", "Agents", "Voice input", "Voice input on this machine"
+        "Voice notifications",
+        "Agents",
+        "Voice output",
+        "Voice input",
+        "Voice input on this machine",
     ]
-    notif, agents, voice_input, machine = sections
+    notif, agents, voice_output, voice_input, machine = sections
     assert [(f.key, f.editor.kind) for f in section_fields(notif)] == [
         ("voice.enabled", "toggle"),
         ("voice.events.tools", "toggle"),
@@ -165,6 +252,20 @@ def test_console_keys_and_user_specs(voice_prefs):
         "Checked agents are muted; permission requests and errors always speak. "
         "Pick a voice per agent, or leave it on the default voice."
     )
+    speed, quality = section_fields(voice_output)
+    assert (
+        speed.key,
+        speed.editor.kind,
+        speed.editor.minimum,
+        speed.editor.maximum,
+        speed.editor.step,
+        speed.placeholder,
+    ) == ("voice.output.speed", "number", 0.5, 2.0, 0.1, "1.0")
+    assert (quality.key, quality.editor.kind) == ("voice.output.quality", "choice")
+    assert list(quality.editor.options) == [
+        ("fp16", "Higher (fp16)"),
+        ("int8", "Standard (int8)"),
+    ]
     enabled, hotkey, model, language, silence = section_fields(voice_input)
     assert (enabled.key, enabled.editor.kind) == ("voice.input.enabled", "toggle")
     assert (hotkey.key, hotkey.editor.kind, hotkey.placeholder) == ("voice.input.hotkey", "custom", "F9")
@@ -174,7 +275,29 @@ def test_console_keys_and_user_specs(voice_prefs):
     assert list(language.editor.options)[0] == ("", "Auto-detect")
     assert (silence.key, silence.editor.kind, silence.unit) == ("voice.input.silence_s", "number", "s")
     assert (silence.editor.minimum, silence.editor.maximum, silence.editor.step) == (0.3, 5.0, 0.1)
-    device, input_device, model_dir, python = section_fields(machine)
+    (
+        output_device,
+        output_model_dir,
+        output_python,
+        device,
+        input_device,
+        model_dir,
+        python,
+    ) = section_fields(machine)
+    assert (output_device.key, output_device.editor.kind) == ("voice.output.output_device", "choice")
+    assert callable(output_device.editor.options)
+    assert (
+        output_model_dir.key,
+        output_model_dir.editor.kind,
+        output_model_dir.editor.mode,
+        output_model_dir.placeholder,
+    ) == ("voice.output.model_dir", "path", "dir", "Empty: the user cache")
+    assert (
+        output_python.key,
+        output_python.editor.kind,
+        output_python.editor.mode,
+        output_python.placeholder,
+    ) == ("voice.output.python", "path", "file", "Empty: Lightfall's own interpreter")
     assert (device.key, device.editor.kind) == ("voice.input.device", "choice")
     assert list(device.editor.options) == [
         ("auto", "Auto (GPU if available)"), ("gpu", "GPU"), ("cpu", "CPU")]
@@ -187,16 +310,11 @@ def test_console_keys_and_user_specs(voice_prefs):
 
 
 def test_page_shows_user_keys_at_user_and_console_keys_at_this_console(qtbot, voice_env):
-    from lightfall.ui.preferences.form.schema import section_fields
-
     dialog = _dialog(qtbot)
     form = _form(dialog)
     assert set(form._rows) == USER_KEYS
     dialog.select_scope(LOCAL)
-    shown_console_keys = CONSOLE_KEYS & {
-        f.key for s in voice_env.page.sections() for f in section_fields(s)
-    }
-    assert set(form._rows) == shown_console_keys
+    assert set(form._rows) == CONSOLE_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +534,65 @@ def test_after_save_applies_to_service_and_controller(qtbot, voice_env):
     assert controller.apply_settings.call_args.args[0].device == "cpu"
 
 
+def test_output_device_choices_from_qmediadevices(qtbot, voice_env, monkeypatch):
+    from PySide6.QtMultimedia import QMediaDevices
+
+    speaker = MagicMock()
+    speaker.description.return_value = "USB speaker"
+    speaker.id.return_value = b"spk-1"
+    monkeypatch.setattr(QMediaDevices, "audioOutputs", staticmethod(lambda: [speaker]))
+    voice_env.prefs.layers[(LOCAL, "voice.output.output_device")] = "gone-speaker"
+    dialog = _dialog(qtbot, LOCAL)
+    editor = _editor(dialog, "voice.output.output_device")
+    box = editor.findChild(QComboBox)
+    assert [box.itemText(i) for i in range(box.count())] == [
+        "Not set",
+        "System default",
+        "USB speaker",
+        "gone-speaker",
+    ]
+    assert editor.value() == "gone-speaker"
+    _pick(dialog, "voice.output.output_device", "System default")
+    assert editor.value() == ""
+    _pick(dialog, "voice.output.output_device", "USB speaker")
+    assert dialog._apply() is True
+    assert voice_env.prefs.calls == [("voice.output.output_device", "spk-1", LOCAL)]
+
+
+def test_voice_output_fields_save_at_their_scopes(qtbot, voice_env, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    service = MagicMock()
+    service_module.set_service(service)
+    dialog = _dialog(qtbot)
+    speed_edit = _editor(dialog, "voice.output.speed").findChild(QLineEdit)
+    speed_edit.setText("1.4")
+    speed_edit.textEdited.emit("1.4")
+    _pick(dialog, "voice.output.quality", "Standard (int8)")
+
+    dialog.select_scope(LOCAL)
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: "D:/kokoro")
+    )
+    _editor(dialog, "voice.output.model_dir").findChild(QToolButton).click()
+    py_edit = _editor(dialog, "voice.output.python").findChild(QLineEdit)
+    py_edit.setText(" C:/tts/python.exe ")
+    py_edit.textEdited.emit(" C:/tts/python.exe ")
+    assert dialog._apply() is True
+
+    assert sorted(voice_env.prefs.calls) == sorted([
+        ("voice.output.speed", 1.4, USER),
+        ("voice.output.quality", "int8", USER),
+        ("voice.output.model_dir", "D:/kokoro", LOCAL),
+        ("voice.output.python", "C:/tts/python.exe", LOCAL),
+    ])
+    applied = service.apply_settings.call_args.args[0]
+    assert applied.speed == 1.4
+    assert applied.quality == "int8"
+    assert applied.model_dir == "D:/kokoro"
+    assert applied.python == "C:/tts/python.exe"
+
+
 def test_test_voice_action(qtbot, voice_env):
     from lightfall.ui.preferences.form.items import ActionItem
 
@@ -425,7 +602,13 @@ def test_test_voice_action(qtbot, voice_env):
     qtbot.waitUntil(lambda: item.status.text() == "Voice service not running", timeout=5000)
 
     service = MagicMock()
+    service._client.state = "loading"
     service_module.set_service(service)
+    item.button.click()
+    qtbot.waitUntil(lambda: item.status.text() == "Voice service loading", timeout=5000)
+    service.speak_test.assert_not_called()
+
+    service._client.state = "ready"
     item.button.click()
     qtbot.waitUntil(lambda: item.status.text() == "Spoken", timeout=5000)
     service.speak_test.assert_called_once_with()
