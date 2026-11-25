@@ -58,11 +58,21 @@ class KokoroSynth:
         model_path: str | os.PathLike[str],
         voices_path: str | os.PathLike[str],
     ) -> None:
+        import onnxruntime as rt
         from kokoro_onnx import Kokoro
 
         self.model_path = os.fspath(model_path)
         self.voices_path = os.fspath(voices_path)
-        self._kokoro = Kokoro(self.model_path, self.voices_path)
+        # Spinning intra-op threads collapse under any competing CPU load: measured on a
+        # 24-core host, the same sentence went 0.9 s -> 5 s after the first call with
+        # spinning on, and held at 1.7 s with it off.
+        opts = rt.SessionOptions()
+        opts.intra_op_num_threads = min(8, os.cpu_count() or 1)
+        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        session = rt.InferenceSession(
+            self.model_path, sess_options=opts, providers=["CPUExecutionProvider"]
+        )
+        self._kokoro = Kokoro.from_session(session, self.voices_path)
 
     def voices(self) -> set[str]:
         return set(self._kokoro.get_voices())
@@ -83,6 +93,12 @@ class KokoroSynth:
 
             arr = resample(arr, int(sr), self.RATE)
         return arr
+
+    def warm_up(self, lang: str = "en-us") -> None:
+        """Run one short synthesis so the first real one isn't slowed by session warm-up."""
+        voices = self.voices()
+        voice = "af_heart" if "af_heart" in voices else min(voices)
+        self.synthesize("Ready.", voice=voice, lang=lang)
 
 
 class FakeSynth:

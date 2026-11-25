@@ -158,6 +158,14 @@ def make_host(
                 if gen != st["gen"] or st["stopping"]:
                     return
                 synth = factory(model_path, voices_path)
+                warm_up = getattr(synth, "warm_up", None)
+                if callable(warm_up):
+                    # The first inference in a fresh session is several times slower; pay it
+                    # here instead of on the first notification.
+                    try:
+                        warm_up(conf["lang"])
+                    except Exception:
+                        log.warning("tts warm-up failed", exc_info=True)
             except Exception as e:
                 log.exception("tts model load failed")
                 err = str(e) or type(e).__name__

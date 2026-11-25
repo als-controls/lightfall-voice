@@ -77,9 +77,13 @@ def test_kokoro_synth_with_fake_module(monkeypatch):
     calls: list[dict] = []
 
     class FakeKokoro:
-        def __init__(self, model_path, voices_path):
-            self.model_path = model_path
+        def __init__(self, session, voices_path):
+            self.session = session
             self.voices_path = voices_path
+
+        @classmethod
+        def from_session(cls, session, voices_path):
+            return cls(session, voices_path)
 
         def get_voices(self):
             return ["af_heart", "bm_george", "af_sky"]
@@ -88,11 +92,32 @@ def test_kokoro_synth_with_fake_module(monkeypatch):
             calls.append({"text": text, "voice": voice, "speed": speed, "lang": lang})
             return np.full(2400, 0.25, dtype=np.float64), 24000
 
+    class FakeOptions:
+        def __init__(self):
+            self.intra_op_num_threads = 0
+            self.config: dict[str, str] = {}
+
+        def add_session_config_entry(self, key, value):
+            self.config[key] = value
+
+    class FakeSession:
+        def __init__(self, path, sess_options=None, providers=None):
+            self.path, self.options, self.providers = path, sess_options, providers
+
     mod = types.ModuleType("kokoro_onnx")
     mod.Kokoro = FakeKokoro
     monkeypatch.setitem(sys.modules, "kokoro_onnx", mod)
+    rt = types.ModuleType("onnxruntime")
+    rt.SessionOptions = FakeOptions
+    rt.InferenceSession = FakeSession
+    monkeypatch.setitem(sys.modules, "onnxruntime", rt)
 
     synth = KokoroSynth("model.onnx", "voices.bin")
+    session = synth._kokoro.session
+    assert session.path == "model.onnx"
+    assert session.providers == ["CPUExecutionProvider"]
+    assert session.options.config == {"session.intra_op.allow_spinning": "0"}
+    assert 1 <= session.options.intra_op_num_threads <= 8
     assert synth.RATE == 24000
     assert synth.voices() == {"af_heart", "bm_george", "af_sky"}
     out = synth.synthesize("Hello.", "af_heart", 1.2, "en-us")
@@ -107,8 +132,10 @@ def test_kokoro_real():
     if not model_dir:
         pytest.skip("LIGHTFALL_TTS_MODEL_DIR not set")
     root = Path(model_dir)
-    model_path = root / "kokoro-v1.0.onnx"
-    voices_path = root / "voices-v1.0.bin"
+    from lightfall_voice.tts_service.models import MODEL_FILES
+
+    model_path = root / MODEL_FILES["fp16"][0]
+    voices_path = root / MODEL_FILES["voices"][0]
     if not (model_path.is_file() and voices_path.is_file()):
         pytest.skip("Kokoro model files not found in LIGHTFALL_TTS_MODEL_DIR")
     synth = KokoroSynth(str(model_path), str(voices_path))

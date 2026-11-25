@@ -204,6 +204,58 @@ def test_default_load_after_delay(broker_url):
     assert summ == {"model": "fp16", "status": "ready", "error": ""}
 
 
+class WarmSynth(FakeSynth):
+    """FakeSynth with the optional warm_up hook; records calls, optionally failing."""
+
+    def __init__(self, *_a, fail: bool = False, **_kw) -> None:
+        super().__init__()
+        self.fail = fail
+        self.warmed: list[str] = []
+
+    def warm_up(self, lang: str = "en-us") -> None:
+        self.warmed.append(lang)
+        if self.fail:
+            raise RuntimeError("warm-up boom")
+
+
+def test_warm_up_runs_before_ready(broker_url):
+    fac = SynthFactory(WarmSynth)
+
+    async def go():
+        r = await _rig(
+            broker_url, resolver=FakeResolver(), synth_factory=fac, initial_load_delay_s=0.6
+        )
+        try:
+            await _until(lambda: r.client.health == "up")
+            await r.client.call("config.set", {"lang": "en-gb"})
+            await r.ready()
+            return dict(r.host.summary)
+        finally:
+            await r.close()
+
+    summ = _run(go())
+    assert summ["status"] == "ready"
+    assert fac.made[-1].warmed == ["en-gb"]
+
+
+def test_warm_up_failure_still_ready(broker_url):
+    fac = SynthFactory(lambda m, v: WarmSynth(m, v, fail=True))
+
+    async def go():
+        r = await _rig(broker_url, resolver=FakeResolver(), synth_factory=fac)
+        try:
+            await r.client.call("config.set", {})
+            await r.ready()
+            reply = await r.client.call("speak", {"text": "Hello there."})
+            return dict(r.host.summary), reply
+        finally:
+            await r.close()
+
+    summ, reply = _run(go())
+    assert summ["status"] == "ready"
+    assert reply["status"] == "ok" and reply["stream_id"]
+
+
 def test_summary_downloading_then_ready(broker_url):
     resolver = FakeResolver(download=True, block=True)
     fac = SynthFactory()
