@@ -27,7 +27,7 @@ def test_descriptor_values():
 def test_manifest_has_service_entry():
     from lightfall_voice.manifest import manifest
 
-    entries = manifest.get_plugins_by_type("service")
+    entries = [e for e in manifest.get_plugins_by_type("service") if e.name == "stt"]
     assert len(entries) == 1
     entry = entries[0]
     assert entry.name == "stt"

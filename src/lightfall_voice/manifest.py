@@ -12,7 +12,7 @@ except PackageNotFoundError:
 manifest = PluginManifest(
     name="lightfall-voice",
     version=_version,
-    description="Spoken notifications for Claude agent sessions via the local voice daemon",
+    description="Voice notifications and voice input for Lightfall agent sessions",
     plugins=[
         # preload=True so on_loaded() runs at startup and starts the VoiceService.
         PluginEntry(
@@ -25,6 +25,11 @@ manifest = PluginManifest(
             type_name="service",
             name="stt",
             import_path="lightfall_voice.stt_plugin:SttServicePlugin",
+        ),
+        PluginEntry(
+            type_name="service",
+            name="tts",
+            import_path="lightfall_voice.tts_plugin:TtsServicePlugin",
         ),
     ],
 )
