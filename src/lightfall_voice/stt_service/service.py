@@ -127,14 +127,27 @@ class _Utterance:
 
 
 class SttHost(ServiceHost):
-    """:class:`ServiceHost` that starts loading the model in the background on start."""
+    """:class:`ServiceHost` that starts loading the model on start and shuts down its worker on stop."""
 
     on_started: Callable[[asyncio.AbstractEventLoop], None] | None = None
+    on_stopping: Callable[[], None] | None = None
+    on_stopped: Callable[[], Any] | None = None
 
     async def start(self, core: Any) -> None:
         await super().start(core)
         if self.on_started is not None:
             self.on_started(asyncio.get_running_loop())
+
+    async def stop(self) -> None:
+        if self.on_stopping is not None:
+            self.on_stopping()
+        try:
+            await super().stop()
+        finally:
+            if self.on_stopped is not None:
+                res = self.on_stopped()
+                if asyncio.iscoroutine(res):
+                    await res
 
 
 INITIAL_LOAD_DELAY_S = 2.0
@@ -168,6 +181,7 @@ def make_host(
         "active": None,  # stream id of the active utterance
         "initial": None,  # TimerHandle of the deferred first load, while pending
         "configured": False,  # a config.set arrived
+        "stopping": False,
     }
     # One worker: a transcription abandoned by utterance.cancel finishes before the next
     # one starts, so the model is never run twice at once.
@@ -197,6 +211,8 @@ def make_host(
             host.set_state(state, summ)
 
         loop = st["loop"]
+        if loop is None:
+            return
         try:
             loop.call_soon_threadsafe(apply)
         except RuntimeError:
@@ -204,7 +220,7 @@ def make_host(
 
     def load(gen: int, conf: dict) -> None:
         with lock:
-            if gen != st["gen"]:
+            if gen != st["gen"] or st["stopping"]:
                 return
             model = conf["model"]
 
@@ -259,7 +275,19 @@ def make_host(
         else:
             st["initial"] = loop.call_later(max(0.0, initial_load_delay_s), initial_load)
 
+    def on_stopping() -> None:
+        st["stopping"] = True
+        pending = st["initial"]
+        if pending is not None:
+            pending.cancel()
+            st["initial"] = None
+
+    async def on_stopped() -> None:
+        await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+
     host.on_started = on_started
+    host.on_stopping = on_stopping
+    host.on_stopped = on_stopped
 
     # -- config --------------------------------------------------------------------------
 
@@ -398,10 +426,11 @@ def make_host(
             if ev == "listening" and not u.listening:
                 u.listening = True
                 await host.emit(session, "utterance.listening", {"stream_id": sid})
-            elif ev in _END_REASONS and u.reason is None:
-                u.reason = ev
+            elif ev in _END_REASONS:
                 u.detector_done = True
-                await host.end_stream(sid, final=True, reason=ev)
+                if u.reason is None:
+                    u.reason = ev
+                    await host.end_stream(sid, final=True, reason=ev)
         if final:
             await finalize(u)
 

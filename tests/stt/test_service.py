@@ -794,3 +794,98 @@ def test_idle_stream_emits_idle_error(broker_url, monkeypatch):
         "message": "Microphone stopped sending audio",
     }
     assert again["status"] == "ok"
+
+
+def test_detector_end_after_stop_stops_feeding_later_chunks(broker_url):
+    """If queued chunks after utterance.stop reach a detector end (e.g. silence),
+    subsequent queued chunks must not be fed into the detector."""
+    fac = Factory("trimmed")
+
+    async def go():
+        r = await _rig(broker_url, fac)
+        try:
+            await r.ready()
+            release = _hold_listening(r.host)
+            sid = await r.start()
+            # 1.0s tone + 1.0s silence reaches detector "silence" at 2.0s; the extra
+            # 1.0s of tone queued after it must not be fed once the detector has ended.
+            audio = np.concatenate([_tone(1.0), _zeros(1.0), _tone(1.0)])
+            await r.send(sid, audio)
+            await r.client.call("utterance.stop", {"stream_id": sid})
+            release.set()
+            await _until(lambda: "transcript" in r.names())
+            return r
+        finally:
+            await r.close()
+
+    r = _run(go())
+    assert r.get("ended")[0]["reason"] == "stop"
+    ((n, _lang),) = fac.made[0].calls
+    assert n == 2 * RATE
+
+
+def test_stop_shuts_down_executor(broker_url, monkeypatch):
+    from lightfall_voice.stt_service import service as svc_mod
+
+    executors = []
+    real_executor = svc_mod.ThreadPoolExecutor
+
+    def track_executor(*a, **kw):
+        ex = real_executor(*a, **kw)
+        executors.append(ex)
+        return ex
+
+    monkeypatch.setattr(svc_mod, "ThreadPoolExecutor", track_executor)
+
+    async def go():
+        r = await _rig(broker_url, Factory())
+        await r.ready()
+        assert len(executors) == 1 and not executors[0]._shutdown
+        await r.close()
+        assert executors[0]._shutdown
+
+    _run(go())
+
+
+def test_stt_smoke_cpu_device_check_and_not_ready_constant(broker_url):
+    import argparse
+    import tools.stt_smoke as stt_smoke
+
+    assert stt_smoke.NOT_READY_CODE == "unknown"
+
+    class DeviceFactory(Factory):
+        def __init__(self, device: str) -> None:
+            super().__init__("smoke ok")
+            self.reported_device = device
+
+        def __call__(self, **cfg):
+            t = super().__call__(**cfg)
+            t.device = self.reported_device
+            return t
+
+    async def go(reported_device: str, requested_device: str) -> int:
+        host = make_host(
+            stt_smoke.SCOPE,
+            transcriber_factory=DeviceFactory(reported_device),
+            heartbeat_s=0.05,
+            single_instance=False,
+            initial_load_delay_s=0.0,
+        )
+        svc = NatsCore(broker_url)
+        await svc.connect()
+        await host.start(svc)
+        try:
+            args = argparse.Namespace(
+                model="small",
+                device=requested_device,
+                model_dir="",
+                load_timeout=10.0,
+                realtime=False,
+            )
+            return await stt_smoke.run(broker_url, "tok", _tone(1.0), args)
+        finally:
+            await host.stop()
+            await svc.close()
+
+    assert _run(go("cpu", "cpu")) == 0
+    assert _run(go("cuda", "cpu")) == 1

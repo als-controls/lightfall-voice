@@ -229,3 +229,28 @@ def test_event_arriving_during_drain_is_spoken_last(qtbot):
     assert len(spoken) == 3
     assert spoken[2].startswith("Permission needed")
     assert not spoken[1].startswith("Permission needed")
+
+
+def test_held_capped_at_50_dropping_oldest_non_high(qtbot):
+    from lightfall_voice.events import permission_event, summary_event
+
+    w, service, client, clock = _setup(qtbot)
+    service.hold()
+    # Enqueue 3 high-priority events interspersed with 55 normal-priority events.
+    service._dispatch(permission_event("lightfall", "High 1", clock["t"]))
+    for i in range(25):
+        service._dispatch(summary_event("lightfall", f"Normal {i}", clock["t"]))
+    service._dispatch(permission_event("lightfall", "High 2", clock["t"]))
+    for i in range(25, 55):
+        service._dispatch(summary_event("lightfall", f"Normal {i}", clock["t"]))
+    service._dispatch(permission_event("lightfall", "High 3", clock["t"]))
+
+    assert len(service._held) == 50
+    texts = [ev.text for ev, _ in service._held]
+    assert "High 1" in texts
+    assert "High 2" in texts
+    assert "High 3" in texts
+    # 58 total -> 8 oldest normal events (Normal 0 .. Normal 7) were dropped.
+    assert [t for t in texts if t.startswith("Normal ")] == [
+        f"Normal {i}" for i in range(8, 55)
+    ]

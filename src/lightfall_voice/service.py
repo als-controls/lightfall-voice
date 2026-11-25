@@ -43,6 +43,16 @@ class _RequeuedSpeech:
     item: SpeechItem
 
 
+MAX_HELD = 50
+
+
+def _is_high_held(entry: tuple[VoiceEvent, float] | _RequeuedSpeech) -> bool:
+    if isinstance(entry, _RequeuedSpeech):
+        return entry.item.priority == "high"
+    event, _ = entry
+    return event.priority == "high"
+
+
 # Name for a session whose widget carries none. Spoken phrases omit it, so
 # the main assistant's errors and permission requests aren't name-prefixed.
 PRIMARY_AGENT = "lightfall"
@@ -118,6 +128,14 @@ class VoiceService(QObject):
             if interrupted:
                 with self._hold_lock:
                     self._held[:0] = [_RequeuedSpeech(item) for item in interrupted]
+                    self._trim_held()
+
+    def _trim_held(self) -> None:
+        while len(self._held) > MAX_HELD:
+            idx = next((i for i, e in enumerate(self._held) if not _is_high_held(e)), None)
+            if idx is None:
+                break
+            self._held.pop(idx)
 
     def release(self) -> None:
         """Undo one hold(); at zero, speak queued events in order, dropping stale ones."""
@@ -314,6 +332,7 @@ class VoiceService(QObject):
         with self._hold_lock:
             if self._hold_count > 0 or self._draining:
                 self._held.append((event, now))
+                self._trim_held()
                 return
         self._speak_event(event, now)
 

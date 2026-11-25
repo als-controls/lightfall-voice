@@ -47,6 +47,19 @@ def test_short_blip_not_speech():
     assert events == ["no_speech"]
 
 
+def test_non_contiguous_blips_do_not_accumulate_to_min_speech():
+    det = EndpointDetector()
+    audio = np.concatenate([
+        _tone(0.2),
+        _zeros(0.5),
+        _tone(0.2),
+        _zeros(0.5),
+        _tone(0.2),
+        _zeros(7.0),
+    ])
+    assert _run(det, audio) == ["no_speech"]
+
+
 def test_custom_silence_s():
     det = EndpointDetector(silence_s=0.3)
     assert _run(det, np.concatenate([_tone(1.0), _zeros(0.5)])) == ["listening", "silence"]
@@ -59,5 +72,5 @@ def test_unaligned_chunks_and_audio():
     a = np.concatenate([_tone(1.0), _zeros(1.2)])
     events = _run(det, a, chunk=777)
     assert events == ["listening", "silence"]
-    assert len(det.audio()) <= len(a)
-    assert len(det.audio()) >= 2 * RATE
+    assert 2 * RATE <= len(det.audio()) < 2 * RATE + 777
+    assert np.array_equal(det.audio(), a[: len(det.audio())])

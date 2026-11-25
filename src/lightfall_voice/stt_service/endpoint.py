@@ -60,10 +60,10 @@ class EndpointDetector:
                 self._speech_s += wsec
                 self._trailing_s = 0.0
             else:
+                self._speech_s = 0.0
                 self._trailing_s += wsec
             if not self._detected and self._speech_s >= self.min_speech_s - 1e-9:
                 self._detected = True
-                self._trailing_s = 0.0 if is_speech else self._trailing_s
                 listening = True
             if elapsed >= self.max_s - 1e-9:
                 return "max"

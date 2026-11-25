@@ -793,3 +793,31 @@ def test_start_pending_cleared_on_stop_and_success():
     ctl._ensure_started()
     assert manager.started == ["stt"]
     assert not ctl._start_pending
+
+
+def test_ignored_transcript_flashes_nothing_heard(rig):
+    w = rig.widgets[0]
+    w.submit_user_prompt = lambda text, *, source="voice": "ignored"
+    w.button.click()
+    rig.emit("utterance.ended", stream_id="s1", reason="stop")
+    rig.emit("utterance.transcript", stream_id="s1", text="hello")
+    assert w.flashed()[-1] == "Didn't catch that"
+    assert rig.ctl.state == "idle"
+    assert rig.voice.held == 0
+
+
+def test_esc_follows_target_window_when_floated_or_redocked(rig, qtbot):
+    floated = QMainWindow()
+    qtbot.addWidget(floated)
+    w = rig.widgets[0]
+    w.button.click()
+    assert rig.ctl.state == "listening"
+
+    # Float the target widget to a new window mid-recording.
+    w._window = floated
+    QTest.keyClick(rig.window, Qt.Key.Key_Escape)
+    assert rig.ctl.state == "listening"  # old window no longer cancels
+
+    QTest.keyClick(floated, Qt.Key.Key_Escape)
+    assert rig.ctl.state == "idle"
+    assert rig.client.calls[-1] == ("utterance.cancel", {"stream_id": "s1"})

@@ -32,6 +32,7 @@ from lightfall_voice.audio import CHUNK_SAMPLES, RATE, float32_to_pcm16, resampl
 
 SCOPE = "lfsttsmoke"
 START = {"rate": RATE, "format": "s16le", "channels": 1}
+NOT_READY_CODE = "unknown"  # utterance.start reply code before the model is loaded
 _WIDTH_DTYPES = {1: np.uint8, 2: np.dtype("<i2"), 4: np.dtype("<i4")}
 
 
@@ -111,7 +112,7 @@ async def run(url: str, token: str, audio: np.ndarray, args: argparse.Namespace)
             if reply.get("status") == "ok":
                 sid = reply["stream_id"]
                 break
-            if reply.get("code") != "unknown":
+            if reply.get("code") != NOT_READY_CODE:
                 print(f"utterance.start failed: {reply}", file=sys.stderr)
                 return 1
             if time.monotonic() > end:
@@ -166,6 +167,9 @@ async def run(url: str, token: str, audio: np.ndarray, args: argparse.Namespace)
         if args.device == "gpu" and summ.get("device") != "cuda":
             print("FAIL: --device gpu did not run on cuda", file=sys.stderr)
             return 1
+        if args.device == "cpu" and summ.get("device") != "cpu":
+            print("FAIL: --device cpu did not run on cpu", file=sys.stderr)
+            return 1
         return 0 if text else 1
     finally:
         await client.close()
@@ -177,12 +181,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("wav", help="PCM WAV file to transcribe")
     p.add_argument("--device", choices=("auto", "gpu", "cpu"), default="auto")
     p.add_argument("--model", default="small")
-    p.add_argument("--model-dir", default="",
-                   help="model cache directory (default: the faster-whisper default)")
-    p.add_argument("--load-timeout", type=float, default=900.0,
-                   help="seconds to wait for the model (the first run downloads it)")
-    p.add_argument("--realtime", action="store_true",
-                   help="pace chunks at 100 ms (default: send as fast as possible)")
+    p.add_argument(
+        "--model-dir",
+        default="",
+        help="model cache directory (default: the faster-whisper default)",
+    )
+    p.add_argument(
+        "--load-timeout",
+        type=float,
+        default=900.0,
+        help="seconds to wait for the model (the first run downloads it)",
+    )
+    p.add_argument(
+        "--realtime",
+        action="store_true",
+        help="pace chunks at 100 ms (default: send as fast as possible)",
+    )
     args = p.parse_args(argv)
 
     audio = read_wav_16k(args.wav)

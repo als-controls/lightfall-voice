@@ -216,3 +216,44 @@ def test_voice_input_fields_save_at_their_scopes(qtbot, voice_env, monkeypatch):
         language="",
         python="C:/py/python.exe",
     )
+
+
+def test_browse_handlers_and_hotkey_roundtrip_save(qtbot, voice_env, monkeypatch):
+    from PySide6.QtGui import QKeySequence
+    from PySide6.QtWidgets import QFileDialog, QKeySequenceEdit
+
+    controller = MagicMock()
+    settings_module.set_controller(controller)
+    dialog = _dialog(qtbot, USER)
+    hk_edit = _editor(dialog, "voice.input.hotkey").findChild(QKeySequenceEdit)
+    hk_edit.setKeySequence(QKeySequence("F10"))
+
+    dialog.select_scope(LOCAL)
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: "D:/whisper-cache")
+    )
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *a, **k: ("C:/venv/Scripts/python.exe", "All Files (*)")),
+    )
+    _editor(dialog, "voice.input.model_dir").findChild(QToolButton).click()
+    _editor(dialog, "voice.input.python").findChild(QToolButton).click()
+    assert dialog._apply() is True
+
+    assert sorted(voice_env.prefs.calls) == sorted([
+        ("voice.input.hotkey", "F10", USER),
+        ("voice.input.model_dir", "D:/whisper-cache", LOCAL),
+        ("voice.input.python", "C:/venv/Scripts/python.exe", LOCAL),
+    ])
+    applied = controller.apply_settings.call_args.args[0]
+    assert applied.hotkey == "F10"
+    assert applied.model_dir == "D:/whisper-cache"
+    assert applied.python == "C:/venv/Scripts/python.exe"
+
+    # Re-opening the dialog loads the saved hotkey and paths back into the editors.
+    dialog2 = _dialog(qtbot, USER)
+    assert _editor(dialog2, "voice.input.hotkey").value() == "F10"
+    dialog2.select_scope(LOCAL)
+    assert _editor(dialog2, "voice.input.model_dir").value() == "D:/whisper-cache"
+    assert _editor(dialog2, "voice.input.python").value() == "C:/venv/Scripts/python.exe"

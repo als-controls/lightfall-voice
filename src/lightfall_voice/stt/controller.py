@@ -154,9 +154,9 @@ class _EscFilter(QObject):
     windows (dialogs included) are untouched, and the filter exists only while listening.
     """
 
-    def __init__(self, window, on_escape: Callable[[], None]) -> None:
+    def __init__(self, window_of: Callable[[], Any], on_escape: Callable[[], None]) -> None:
         super().__init__()
-        self._window = window
+        self._window_of = window_of
         self._on_escape = on_escape
         self._armed = True
 
@@ -167,13 +167,14 @@ class _EscFilter(QObject):
         etype = event.type()
         if not self._armed or etype not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
             return False
-        if not isinstance(obj, QWidget) or not _alive(self._window):
+        if not isinstance(obj, QWidget):
             return False
         if event.key() != Qt.Key.Key_Escape or event.modifiers() != Qt.KeyboardModifier.NoModifier:
             return False
         if event.isAutoRepeat():
             return False  # a held Esc: only the first press counts; stay armed
-        if obj.window() is not self._window:
+        window = self._window_of()
+        if not _alive(window) or obj.window() is not window:
             return False
         if etype == QEvent.Type.ShortcutOverride:
             event.accept()  # deliver Esc as a key press instead of a shortcut
@@ -612,7 +613,8 @@ class VoiceInputController(QObject):
             self._finish(None if text else NOTHING_HEARD)
             if text and _alive(target):
                 try:
-                    target.submit_user_prompt(text, source="voice")
+                    if target.submit_user_prompt(text, source="voice") == "ignored":
+                        target.placeholder_flash(NOTHING_HEARD)
                 except Exception:
                     logger.exception("lightfall-voice: submitting the transcript failed")
         elif name == "utterance.error":
@@ -733,17 +735,22 @@ class VoiceInputController(QObject):
         hotkey.activated.connect(self._on_hotkey)
         self._hotkey_shortcut = hotkey
 
+    def _target_window(self, target) -> Any:
+        if _alive(target):
+            window_of = getattr(target, "window", None)
+            window = window_of() if callable(window_of) else None
+            if _alive(window):
+                return window
+        window = self._window_lookup()
+        return window if _alive(window) else None
+
     def _install_esc(self, target) -> None:
         """Esc cancels while listening, in the target's own window only (see _EscFilter)."""
         self._remove_esc()
-        window_of = getattr(target, "window", None)
-        window = window_of() if callable(window_of) else None
-        if window is None:
-            window = self._window_lookup()
         app = QApplication.instance()
-        if window is None or app is None:
+        if app is None or self._target_window(target) is None:
             return
-        esc = _EscFilter(window, self.cancel)
+        esc = _EscFilter(lambda: self._target_window(target), self.cancel)
         app.installEventFilter(esc)
         self._esc_filter = esc
 
