@@ -659,3 +659,26 @@ def test_client_replacement_disconnects_old_signals_and_clears_playback(rig):
         {"text": "On new client", "voice": "af_bella", "speed": 1.25},
     )
     assert rig.player.begun[-1] == ("s1", 24000, 1)
+
+
+def test_speak_from_worker_thread_is_marshalled(rig, qtbot):
+    import threading
+
+    from PySide6.QtCore import QThread
+
+    rig.client.calls.clear()
+    seen_threads: list[bool] = []
+    original = rig.tts._scheduler.submit
+
+    def submit(item):
+        seen_threads.append(QThread.currentThread() is rig.tts.thread())
+        original(item)
+
+    rig.tts._scheduler.submit = submit
+    worker = threading.Thread(target=lambda: rig.tts.speak("From a worker"))
+    worker.start()
+    worker.join(5)
+    qtbot.waitUntil(lambda: bool(rig.client.calls), timeout=2000)
+    assert seen_threads == [True]
+    assert rig.client.calls[0][0] == "speak"
+    assert rig.client.calls[0][1]["text"] == "From a worker"

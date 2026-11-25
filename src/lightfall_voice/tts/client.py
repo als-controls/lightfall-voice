@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import shiboken6
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from lightfall.utils.logging import logger
 from lightfall_utils.threads import initialize_main_thread_invoker, invoke_in_main_thread
@@ -156,7 +156,14 @@ class TtsClient(QObject):
         ttl: float | None = None,
         priority: Priority = "normal",
     ) -> None:
-        """Submit ``message`` for synthesis and playback if the service is ready."""
+        """Submit ``message`` for synthesis and playback if the service is ready.
+
+        Safe from any thread: agent signals may arrive off the Qt main thread, so a call
+        from elsewhere is re-posted to this object's thread (the deadline starts now).
+        """
+        if not self._on_own_thread():
+            invoke_in_main_thread(self.speak, message, voice, ttl, priority)
+            return
         if self._state != "ready" or self._client is None:
             logger.debug("lightfall-voice: tts not ready ({}); dropping speech", self._state)
             return
@@ -171,15 +178,24 @@ class TtsClient(QObject):
         )
         self._scheduler.submit(item)
 
+    def _on_own_thread(self) -> bool:
+        return QThread.currentThread() is self.thread()
+
     def stop_all(self) -> SpeechItem | None:
-        """Stop playback, clear queued speech and return any interrupted high-priority item."""
+        """Stop playback, clear queued speech and return any interrupted high-priority item.
+
+        Main thread only (it returns a value); VoiceService.hold() is called from the UI.
+        """
         interrupted = self._scheduler.stop_all()
         if self._player is not None:
             self._player.stop()
         return interrupted
 
     def requeue(self, item: SpeechItem) -> None:
-        """Submit ``item`` with its original deadline if the service is ready."""
+        """Submit ``item`` with its original deadline if the service is ready. Any thread."""
+        if not self._on_own_thread():
+            invoke_in_main_thread(self.requeue, item)
+            return
         if self._state != "ready" or self._client is None:
             logger.debug("lightfall-voice: tts not ready ({}); dropping requeue", self._state)
             return
