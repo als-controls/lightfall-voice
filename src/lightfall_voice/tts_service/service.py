@@ -13,15 +13,12 @@ import threading
 from typing import Any
 import uuid
 
-from lightfall_utils.ipc.services import protocol as P
 from lightfall_utils.ipc.services.host import ServiceError, ServiceHost, Session
 from lightfall_voice.audio import float32_to_pcm16
 from lightfall_voice.tts_service import models
 from lightfall_voice.tts_service.synth import RATE, KokoroSynth, split_sentences
 
 log = logging.getLogger(__name__)
-
-P.ERROR_CODES = P.ERROR_CODES | frozenset({"not_ready", "bad_voice"})
 
 NAME = "tts"
 CONTRACT = "1.0"
@@ -336,9 +333,9 @@ def make_host(
         speed = min(MAX_SPEED, max(MIN_SPEED, float(raw_speed)))
         synth = st["synth"]
         if synth is None:
-            raise ServiceError("not_ready", "model not ready")
+            raise ServiceError("unknown", "model not ready")
         if voice not in synth.voices():
-            raise ServiceError("bad_voice", f"unknown voice {voice!r}")
+            raise ServiceError("bad_request", f"unknown voice {voice!r}")
 
         sid = uuid.uuid4().hex
         job = _Speech(

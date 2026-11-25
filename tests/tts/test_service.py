@@ -259,7 +259,8 @@ def test_missing_files_error_status(broker_url):
     assert summary["status"] == "error"
     assert "Missing kokoro-v1.0.fp16.onnx" in summary["error"]
     assert speak_reply["status"] == "error"
-    assert speak_reply["code"] == "not_ready"
+    assert speak_reply["code"] == "unknown"
+    assert speak_reply["message"] == "model not ready"
 
 
 def test_speak_streams_chunks_then_final(broker_url):
@@ -335,7 +336,8 @@ def test_speak_unknown_voice(broker_url):
 
     reply = _run(go())
     assert reply["status"] == "error"
-    assert reply["code"] == "bad_voice"
+    assert reply["code"] == "bad_request"
+    assert reply["message"] == "unknown voice 'unknown_voice'"
 
 
 def test_speak_not_ready(broker_url):
@@ -355,7 +357,8 @@ def test_speak_not_ready(broker_url):
 
     reply = _run(go())
     assert reply["status"] == "error"
-    assert reply["code"] == "not_ready"
+    assert reply["code"] == "unknown"
+    assert reply["message"] == "model not ready"
 
 
 def test_cancel_mid_stream_emits_final_and_no_more_chunks(broker_url):
