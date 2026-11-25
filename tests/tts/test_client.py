@@ -7,7 +7,7 @@ import concurrent.futures
 import pytest
 from PySide6.QtCore import QObject, Signal
 
-from lightfall_voice.tts.client import OutputSettings, TtsClient
+from lightfall_voice.tts.client import MAX_EARLY_CHUNKS, OutputSettings, TtsClient
 from lightfall_voice.tts.scheduler import SpeechItem
 
 READY = {"state": "ready", "summary": {"status": "ready", "model": "fp16", "error": ""}}
@@ -82,15 +82,24 @@ class FakePlayer(QObject):
         self.stops = 0
         self.is_playing = False
         self.stream_id: str | None = None
+        self.fail_on_begin = False
 
     def begin(self, stream_id: str, rate: int = 24000, channels: int = 1) -> None:
         self.begun.append((stream_id, rate, channels))
+        if self.fail_on_begin:
+            self.failed.emit("Could not open speaker")
+            return
         self.stream_id = stream_id
         self.is_playing = True
 
     def feed(self, stream_id: str, data: bytes, final: bool = False) -> None:
-        if self.is_playing and stream_id == self.stream_id:
-            self.fed.append((stream_id, bytes(data), final))
+        if not self.is_playing or stream_id != self.stream_id:
+            return
+        self.fed.append((stream_id, bytes(data), final))
+        if final:
+            self.is_playing = False
+            self.stream_id = None
+            self.finished.emit(stream_id)
 
     def stop(self) -> None:
         self.stops += 1
@@ -186,7 +195,6 @@ def test_speak_calls_service_and_feeds_player(rig):
         ("s1", b"\x03\x04", True),
     ]
 
-    rig.player.finished.emit("s1")
     # Default voice fallback to af_heart when default_voice is empty and voice is None
     rig.tts.apply_settings(
         OutputSettings(
@@ -267,15 +275,20 @@ def test_late_reply_after_cancel_is_cancelled_not_played(rig):
     assert rig.client.actions() == ["speak"]
     assert rig.player.begun == []
 
+    # Early chunk buffered while reply is pending should be cleared on cancel
+    rig.client.stream_chunk.emit("s_late", 0, b"\x01\x02", False)
+
     # Cancel before the speak reply arrives
     rig.tts.stop_all()
     assert rig.player.begun == []
+    assert rig.tts._early_chunks == {}
 
     # Now the speak reply arrives late
     pending.set_result(
         {"status": "ok", "stream_id": "s_late", "rate": 24000, "channels": 1}
     )
     assert rig.player.begun == []
+    assert rig.player.fed == []
     assert rig.client.calls[-1] == ("cancel", {"stream_id": "s_late"})
 
 
@@ -455,3 +468,194 @@ def test_speak_rpc_error_and_player_failed_advance_queue(rig):
         "Third high item",
     ]
     assert rig.player.begun == [("s1", 24000, 1), ("s2", 24000, 1)]
+
+
+def test_chunks_before_reply_are_replayed(rig):
+    rig.client.calls.clear()
+    pending: concurrent.futures.Future = concurrent.futures.Future()
+    rig.client.speak_futures.append(pending)
+
+    rig.tts.speak("First item", priority="high")
+    rig.tts.speak("Second item", priority="high")
+    assert rig.player.begun == []
+
+    # Chunks arrive before the speak reply resolves
+    rig.client.stream_chunk.emit("s_early", 0, b"\x01\x02", False)
+    rig.client.stream_chunk.emit("s_early", 1, b"", True)
+    assert rig.player.fed == []
+
+    pending.set_result(
+        {"status": "ok", "stream_id": "s_early", "rate": 24000, "channels": 1}
+    )
+    assert rig.player.fed == [
+        ("s_early", b"\x01\x02", False),
+        ("s_early", b"", True),
+    ]
+    assert rig.tts._early_chunks == {}
+    # Because the final chunk completed "s_early", the next queued item started
+    assert rig.player.begun == [("s_early", 24000, 1), ("s1", 24000, 1)]
+    assert [c[1].get("text") for c in rig.client.calls if c[0] == "speak"] == [
+        "First item",
+        "Second item",
+    ]
+
+    # Also verify the 64-chunk cap drops the oldest chunks when exceeded
+    pending2: concurrent.futures.Future = concurrent.futures.Future()
+    rig.client.speak_futures.append(pending2)
+    rig.player.finished.emit("s1")
+    rig.player.fed.clear()
+    rig.tts.speak("Capped item", priority="high")
+    for seq in range(MAX_EARLY_CHUNKS + 5):
+        rig.client.stream_chunk.emit("s_cap", seq, bytes([seq]), False)
+    assert len(rig.tts._early_chunks["s_cap"]) == MAX_EARLY_CHUNKS
+    pending2.set_result(
+        {"status": "ok", "stream_id": "s_cap", "rate": 24000, "channels": 1}
+    )
+    assert len(rig.player.fed) == MAX_EARLY_CHUNKS
+    assert rig.player.fed[0] == ("s_cap", bytes([5]), False)
+    assert rig.player.fed[-1] == ("s_cap", bytes([MAX_EARLY_CHUNKS + 4]), False)
+
+
+def test_speech_error_for_current_item_advances_queue(rig):
+    rig.client.calls.clear()
+    rig.tts.speak("First high", priority="high")
+    rig.tts.speak("Second high", priority="high")
+    assert rig.player.begun == [("s1", 24000, 1)]
+    assert rig.player.is_playing
+
+    # Unrelated stream_id is ignored
+    rig.client.event.emit(
+        "speech.error", {"stream_id": "other", "code": "unknown", "message": "ignored"}
+    )
+    assert rig.player.begun == [("s1", 24000, 1)]
+    assert rig.player.is_playing
+
+    # Current stream_id stops player and advances to the next queued item
+    stops_before = rig.player.stops
+    rig.client.event.emit(
+        "speech.error", {"stream_id": "s1", "code": "unknown", "message": "synth boom"}
+    )
+    assert rig.player.stops > stops_before
+    assert rig.player.begun == [("s1", 24000, 1), ("s2", 24000, 1)]
+
+    # speech.error arriving while the speak reply is still pending is buffered and applied
+    pending: concurrent.futures.Future = concurrent.futures.Future()
+    rig.client.speak_futures.append(pending)
+    rig.tts.speak("Third high", priority="high")
+    rig.tts.speak("Fourth high", priority="high")
+    rig.player.finished.emit("s2")  # starts "Third high" with pending reply
+    rig.client.event.emit(
+        "speech.error",
+        {"stream_id": "s_pending_err", "code": "unknown", "message": "early fail"},
+    )
+    pending.set_result(
+        {"status": "ok", "stream_id": "s_pending_err", "rate": 24000, "channels": 1}
+    )
+    assert rig.player.begun[-1] == ("s3", 24000, 1)
+    assert [c[1].get("text") for c in rig.client.calls if c[0] == "speak"] == [
+        "First high",
+        "Second high",
+        "Third high",
+        "Fourth high",
+    ]
+
+
+def test_player_failure_cancels_stream_on_service(rig):
+    rig.client.calls.clear()
+    rig.tts.speak("First item", priority="high")
+    rig.tts.speak("Second item", priority="high")
+    assert rig.player.begun == [("s1", 24000, 1)]
+
+    # Async failure while playing cancels "s1" on the service and advances queue
+    rig.player.failed.emit("Audio output error: IOError")
+    assert rig.client.calls == [
+        ("speak", {"text": "First item", "voice": "af_bella", "speed": 1.25}),
+        ("cancel", {"stream_id": "s1"}),
+        ("speak", {"text": "Second item", "voice": "af_bella", "speed": 1.25}),
+    ]
+    assert rig.player.begun == [("s1", 24000, 1), ("s2", 24000, 1)]
+
+    # Synchronous failure inside player.begin also cancels the stream on the service
+    rig.player.finished.emit("s2")
+    rig.client.calls.clear()
+    rig.player.fail_on_begin = True
+    rig.tts.speak("Sync begin fail", priority="high")
+    rig.tts.speak("After sync fail", priority="high")
+    assert rig.client.calls == [
+        ("speak", {"text": "Sync begin fail", "voice": "af_bella", "speed": 1.25}),
+        ("cancel", {"stream_id": "s3"}),
+        ("speak", {"text": "After sync fail", "voice": "af_bella", "speed": 1.25}),
+        ("cancel", {"stream_id": "s4"}),
+    ]
+
+
+def test_output_device_change_keeps_queue(rig):
+    rig.client.calls.clear()
+    rig.tts.speak("First high", priority="high")
+    rig.tts.speak("Second high", priority="high")
+    rig.tts.speak("Pending normal", priority="normal")
+    old_player = rig.player
+    assert old_player.begun == [("s1", 24000, 1)]
+    assert old_player.is_playing
+
+    rig.tts.apply_settings(
+        OutputSettings(
+            enabled=True,
+            speed=1.25,
+            quality="fp16",
+            model_dir="",
+            output_device="dev1",
+            default_voice="af_bella",
+        )
+    )
+    assert len(rig.players) == 2
+    assert not old_player.is_playing
+    assert rig.player.device_id == "dev1"
+    # Current item ("s1") was cancelled, and queued "Second high" started on new player
+    assert rig.client.calls == [
+        ("speak", {"text": "First high", "voice": "af_bella", "speed": 1.25}),
+        ("cancel", {"stream_id": "s1"}),
+        ("speak", {"text": "Second high", "voice": "af_bella", "speed": 1.25}),
+    ]
+    assert rig.player.begun == [("s2", 24000, 1)]
+
+    # Finishing "Second high" advances to "Pending normal"
+    rig.player.finished.emit("s2")
+    assert rig.client.calls[-1] == (
+        "speak",
+        {"text": "Pending normal", "voice": "af_bella", "speed": 1.25},
+    )
+    assert rig.player.begun == [("s2", 24000, 1), ("s3", 24000, 1)]
+
+
+def test_client_replacement_disconnects_old_signals_and_clears_playback(rig):
+    old_client = rig.client
+    rig.tts.speak("Playing on old", priority="high")
+    rig.tts.speak("Queued on old", priority="high")
+    assert rig.player.is_playing
+
+    new_client = FakeClient()
+    rig.manager.create(new_client)
+    assert not rig.player.is_playing
+    assert rig.tts._scheduler.current is None
+    assert len(rig.tts._scheduler.high_queue) == 0
+    assert rig.tts.state == "ready"
+    assert new_client.calls == [
+        ("config.set", {"model_dir": "", "quality": "fp16", "lang": "en-us"})
+    ]
+    assert "speech.error" in new_client.watched
+
+    # Old client signals are disconnected and do not affect state or playback
+    old_client.set_health("down", "old client died")
+    old_client.stream_chunk.emit("s1", 0, b"\x01\x02", False)
+    old_client.restarted.emit()
+    assert rig.tts.state == "ready"
+    assert rig.player.fed == []
+
+    # Speaking uses the new client
+    rig.tts.speak("On new client")
+    assert new_client.calls[-1] == (
+        "speak",
+        {"text": "On new client", "voice": "af_bella", "speed": 1.25},
+    )
+    assert rig.player.begun[-1] == ("s1", 24000, 1)

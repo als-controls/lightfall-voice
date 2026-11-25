@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -24,6 +25,7 @@ EVENTS = ("speech.error",)
 DEFAULT_VOICE = "af_heart"
 DEFAULT_RATE = 24000
 DEFAULT_CHANNELS = 1
+MAX_EARLY_CHUNKS = 64
 
 _UNAVAILABLE_HEALTH = frozenset({"down", "incompatible", "unauthorized"})
 
@@ -103,6 +105,8 @@ class TtsClient(QObject):
         self._gen = 0
         self._sid: str | None = None
         self._active_item: SpeechItem | None = None
+        self._early_chunks: dict[str, deque[tuple[int, bytes, bool]]] = {}
+        self._early_errors: set[str] = set()
         self._player: Any = None
         self._replace_player(settings.output_device)
 
@@ -184,9 +188,11 @@ class TtsClient(QObject):
     def apply_settings(self, settings: OutputSettings) -> None:
         """Adopt new output settings: speaker device, service start/stop and ``config.set``."""
         old, self._settings = self._settings, settings
-        if settings.output_device != old.output_device:
-            if self._active_item is not None:
-                self._reset_playback(cancel=True)
+        device_changed = settings.output_device != old.output_device
+        interrupted = self._scheduler.current if device_changed else None
+        if device_changed:
+            if interrupted is not None:
+                self._cancel_item(interrupted)
             self._replace_player(settings.output_device)
         if not self._started:
             return
@@ -207,6 +213,8 @@ class TtsClient(QObject):
         elif settings.enabled:
             if settings.service_config() != old.service_config():
                 self._push_config()
+        if interrupted is not None and settings.enabled:
+            self._scheduler.finished(interrupted)
         self._refresh()
 
     # -- service client --------------------------------------------------------------------
@@ -355,6 +363,15 @@ class TtsClient(QObject):
         player.failed.connect(self._on_player_failed)
         self._player = player
 
+    def _cancel_stream(self, sid: str | None, client: Any = None) -> None:
+        target = self._client if client is None else client
+        if not isinstance(sid, str) or not _alive(target):
+            return
+        try:
+            target.call("cancel", {"stream_id": sid}).add_done_callback(self._log_failure)
+        except Exception:
+            logger.exception("lightfall-voice: cancel failed")
+
     def _start_item(self, item: SpeechItem) -> None:
         client = self._client
         if client is None:
@@ -364,6 +381,8 @@ class TtsClient(QObject):
         gen = self._gen
         self._active_item = item
         self._sid = None
+        self._early_chunks.clear()
+        self._early_errors.clear()
         try:
             future = client.call(
                 "speak",
@@ -390,37 +409,46 @@ class TtsClient(QObject):
             or self._scheduler.current is not item
             or client is not self._client
         ):
-            if isinstance(sid, str) and _alive(client):
-                try:
-                    client.call("cancel", {"stream_id": sid}).add_done_callback(
-                        self._log_failure
-                    )
-                except Exception:
-                    logger.exception("lightfall-voice: cancel failed")
+            if isinstance(sid, str):
+                self._early_chunks.pop(sid, None)
+                self._early_errors.discard(sid)
+            if self._active_item is None or self._sid is not None:
+                self._early_chunks.clear()
+                self._early_errors.clear()
+            self._cancel_stream(sid, client)
             return
         if error is not None or not isinstance(sid, str):
             logger.warning("lightfall-voice: speak failed: {}", error or "no stream id")
             self._active_item = None
             self._sid = None
+            self._early_chunks.clear()
+            self._early_errors.clear()
             self._scheduler.finished(item)
             return
+        early_chunks = sorted(self._early_chunks.pop(sid, ()), key=lambda c: c[0])
+        early_error = sid in self._early_errors
+        self._early_chunks.clear()
+        self._early_errors.clear()
         rate = int(reply.get("rate") or DEFAULT_RATE)
         channels = int(reply.get("channels") or DEFAULT_CHANNELS)
         self._sid = sid
         self._player.begin(sid, rate, channels)
+        if self._sid != sid or self._active_item is not item:
+            return
+        for _seq, chunk_data, final in early_chunks:
+            if self._sid != sid or self._active_item is not item:
+                return
+            self._player.feed(sid, chunk_data, final)
+        if early_error and self._sid == sid and self._active_item is item:
+            self._finish_failed_item(cancel_remote=False)
 
     def _cancel_item(self, _item: SpeechItem) -> None:
         self._gen += 1
         sid, self._sid = self._sid, None
         self._active_item = None
-        client = self._client
-        if client is not None and sid is not None:
-            try:
-                client.call("cancel", {"stream_id": sid}).add_done_callback(
-                    self._log_failure
-                )
-            except Exception:
-                logger.exception("lightfall-voice: cancel failed")
+        self._early_chunks.clear()
+        self._early_errors.clear()
+        self._cancel_stream(sid)
         if self._player is not None:
             self._player.stop()
 
@@ -429,23 +457,58 @@ class TtsClient(QObject):
             self._gen += 1
             self._sid = None
             self._active_item = None
+            self._early_chunks.clear()
+            self._early_errors.clear()
         self._scheduler.stop_all()
+        self._early_chunks.clear()
+        self._early_errors.clear()
         if self._player is not None:
             self._player.stop()
 
-    def _on_stream_chunk(self, sid: str, _seq: int, data: object, final: bool) -> None:
+    def _finish_failed_item(self, *, cancel_remote: bool) -> None:
+        item = self._active_item
+        if item is None:
+            return
+        self._gen += 1
+        sid, self._sid = self._sid, None
+        self._active_item = None
+        self._early_chunks.clear()
+        self._early_errors.clear()
+        if cancel_remote:
+            self._cancel_stream(sid)
+        if self._player is not None:
+            self._player.stop()
+        self._scheduler.finished(item)
+
+    def _on_stream_chunk(self, sid: str, seq: int, data: object, final: bool) -> None:
+        if self._active_item is not None and self._sid is None:
+            buf = self._early_chunks.get(sid)
+            if buf is None:
+                buf = deque(maxlen=MAX_EARLY_CHUNKS)
+                self._early_chunks[sid] = buf
+            buf.append((int(seq), bytes(data), bool(final)))
+            return
         if sid != self._sid or self._sid is None or self._player is None:
             return
         self._player.feed(sid, bytes(data), bool(final))
 
     def _on_event(self, name: str, payload: dict) -> None:
-        if name == "speech.error":
-            payload = payload if isinstance(payload, dict) else {}
-            logger.warning(
-                "lightfall-voice: speech.error ({}): {}",
-                payload.get("code"),
-                payload.get("message"),
-            )
+        if name != "speech.error":
+            return
+        payload = payload if isinstance(payload, dict) else {}
+        logger.warning(
+            "lightfall-voice: speech.error ({}): {}",
+            payload.get("code"),
+            payload.get("message"),
+        )
+        sid = payload.get("stream_id")
+        if not isinstance(sid, str):
+            return
+        if self._active_item is not None and self._sid is None:
+            self._early_errors.add(sid)
+            return
+        if sid == self._sid and self._active_item is not None:
+            self._finish_failed_item(cancel_remote=False)
 
     def _on_player_finished(self, sid: str) -> None:
         sender = self.sender()
@@ -457,6 +520,8 @@ class TtsClient(QObject):
         self._gen += 1
         self._active_item = None
         self._sid = None
+        self._early_chunks.clear()
+        self._early_errors.clear()
         self._scheduler.finished(item)
 
     def _on_player_failed(self, reason: str) -> None:
@@ -464,12 +529,7 @@ class TtsClient(QObject):
         if sender is not None and sender is not self._player:
             return
         logger.warning("lightfall-voice: player failed: {}", reason)
-        item = self._active_item
-        if item is not None:
-            self._gen += 1
-            self._active_item = None
-            self._sid = None
-            self._scheduler.finished(item)
+        self._finish_failed_item(cancel_remote=True)
 
     # -- helpers ---------------------------------------------------------------------------
 
@@ -491,13 +551,7 @@ class TtsClient(QObject):
         except Exception:
             logger.exception("lightfall-voice: tts callback failed")
             if self._active_item is not None and (gen is None or gen == self._gen):
-                item = self._active_item
-                self._gen += 1
-                self._active_item = None
-                self._sid = None
-                if self._player is not None:
-                    self._player.stop()
-                self._scheduler.finished(item)
+                self._finish_failed_item(cancel_remote=True)
 
     @staticmethod
     def _log_failure(future: concurrent.futures.Future) -> None:
